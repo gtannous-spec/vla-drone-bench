@@ -1,0 +1,67 @@
+# =============================================================================
+# VLA Navigation Benchmark — AirSim Neighborhood Configuration
+# 5 urban drone navigation tasks for the Classical Waypoint baseline.
+#
+# Coordinate frame: NED (North-East-Down) — AirSim native.
+#   x = North, y = East, z = Down (negative z = altitude above ground)
+# All positions in metres; speeds in m/s.
+# =============================================================================
+
+arrival_tolerance: 1.5          # metres — how close counts as "arrived"
+takeoff_altitude: -10.0         # NED: negative = above ground
+nav_speed: 5.0                  # default cruise speed (m/s)
+land_speed: 1.0                 # descent speed during landing (m/s)
+mission_timeout: 90             # seconds — abort if not DONE by this time
+telemetry_rate_hz: 10           # trajectory logging frequency
+vla_inference_hz: 2             # OpenVLA inference rate (future use)
+
+tasks:
+  - id: 1
+    instruction: "Fly to the red car parked near the cul-de-sac"
+    start: [0.0, 0.0, -2.0]
+    goal:  [50.0, 20.0, -10.0]
+    constraints:
+      min_altitude: 3.0
+      max_altitude: 20.0
+      max_speed: 8.0
+      geofence_radius: 150.0
+
+  - id: 2
+    instruction: "Navigate to the rooftop of the two-story house on the left"
+    start: [0.0, 0.0, -2.0]
+    goal:  [80.0, -30.0, -12.0]
+    constraints:
+      min_altitude: 3.0
+      max_altitude: 25.0
+      max_speed: 8.0
+      geofence_radius: 150.0
+
+  - id: 3
+    instruction: "Go around the block and land in the backyard behind the white house"
+    start: [0.0, 0.0, -2.0]
+    goal:  [-40.0, 60.0, -15.0]
+    constraints:
+      min_altitude: 3.0
+      max_altitude: 20.0
+      max_speed: 6.0
+      geofence_radius: 150.0
+
+  - id: 4
+    instruction: "Fly low over the main road heading north toward the intersection"
+    start: [0.0, 0.0, -2.0]
+    goal:  [120.0, 0.0, -6.0]
+    constraints:
+      min_altitude: 3.0
+      max_altitude: 10.0
+      max_speed: 10.0
+      geofence_radius: 200.0
+
+  - id: 5
+    instruction: "Inspect the mailbox at the end of the driveway on the right"
+    start: [0.0, 0.0, -2.0]
+    goal:  [30.0, -50.0, -10.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 12.0
+      max_speed: 5.0
+      geofence_radius: 150.0

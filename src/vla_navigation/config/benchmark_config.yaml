@@ -1,0 +1,117 @@
+# =============================================================================
+# VLA Navigation Benchmark — Configuration
+# 10 representative urban drone navigation tasks.
+# The "instruction" field carries the natural-language prompt for the VLA;
+# the classical planner ignores it and navigates purely by coordinates.
+# =============================================================================
+
+# Coordinate frame: ENU (East-North-Up), origin at drone spawn point.
+# All positions in metres; speeds in m/s.
+
+arrival_tolerance: 0.5          # metres — how close counts as "arrived"
+setpoint_rate_hz: 20            # TrajectorySetpoint publish rate
+takeoff_altitude: 5.0           # default takeoff height (m AGL)
+land_speed: 0.5                 # descent speed during landing (m/s)
+mission_timeout: 120            # seconds — abort if not DONE by this time
+vla_inference_hz: 2             # OpenVLA inference rate (Hz)
+
+tasks:
+  - id: 1
+    instruction: "Fly to the red car parked on the east side of the street"
+    start: [0.0, 0.0, 0.0]
+    goal:  [15.0, 10.0, 5.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 15.0
+      max_speed: 3.0
+      geofence_radius: 80.0
+
+  - id: 2
+    instruction: "Navigate to the rooftop of the tall building ahead"
+    start: [0.0, 0.0, 0.0]
+    goal:  [25.0, -5.0, 20.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 25.0
+      max_speed: 2.5
+      geofence_radius: 80.0
+
+  - id: 3
+    instruction: "Go around the building and land in the parking lot behind it"
+    start: [0.0, 0.0, 0.0]
+    goal:  [-10.0, 20.0, 3.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 12.0
+      max_speed: 2.0
+      geofence_radius: 80.0
+
+  - id: 4
+    instruction: "Fly low over the main road heading north"
+    start: [0.0, 0.0, 0.0]
+    goal:  [0.0, 40.0, 4.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 8.0
+      max_speed: 4.0
+      geofence_radius: 80.0
+
+  - id: 5
+    instruction: "Inspect the blue dumpster near the alley entrance"
+    start: [0.0, 0.0, 0.0]
+    goal:  [8.0, -12.0, 3.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 10.0
+      max_speed: 1.5
+      geofence_radius: 80.0
+
+  - id: 6
+    instruction: "Hover above the intersection and observe traffic"
+    start: [0.0, 0.0, 0.0]
+    goal:  [20.0, 20.0, 10.0]
+    constraints:
+      min_altitude: 5.0
+      max_altitude: 15.0
+      max_speed: 3.0
+      geofence_radius: 80.0
+
+  - id: 7
+    instruction: "Deliver a package to the front door of the white house"
+    start: [0.0, 0.0, 0.0]
+    goal:  [-15.0, 8.0, 2.5]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 10.0
+      max_speed: 2.0
+      geofence_radius: 80.0
+
+  - id: 8
+    instruction: "Survey the construction site on the west block"
+    start: [0.0, 0.0, 0.0]
+    goal:  [-30.0, -10.0, 12.0]
+    constraints:
+      min_altitude: 5.0
+      max_altitude: 20.0
+      max_speed: 3.5
+      geofence_radius: 80.0
+
+  - id: 9
+    instruction: "Fly between the two towers and exit on the far side"
+    start: [0.0, 0.0, 0.0]
+    goal:  [35.0, 0.0, 15.0]
+    constraints:
+      min_altitude: 5.0
+      max_altitude: 25.0
+      max_speed: 2.5
+      geofence_radius: 80.0
+
+  - id: 10
+    instruction: "Return to the launch pad after a perimeter sweep"
+    start: [0.0, 0.0, 0.0]
+    goal:  [2.0, 2.0, 3.0]
+    constraints:
+      min_altitude: 2.0
+      max_altitude: 15.0
+      max_speed: 3.0
+      geofence_radius: 80.0

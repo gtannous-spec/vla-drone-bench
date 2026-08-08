@@ -1,0 +1,8 @@
+# Install numpy and msgpack-rpc-python FIRST — airsim's setup.py imports them.
+# Run: pip install numpy msgpack-rpc-python && pip install -r requirements.txt
+numpy>=1.24.0
+msgpack-rpc-python
+airsim>=1.8.1
+matplotlib>=3.7.0
+pyyaml>=6.0
+opencv-python>=4.8.0
