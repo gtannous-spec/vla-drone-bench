@@ -6,3 +6,14 @@ airsim>=1.8.1
 matplotlib>=3.7.0
 pyyaml>=6.0
 opencv-python>=4.8.0
+
+# VLA dependencies (Milestone 2) — requires CUDA GPU
+# Note: PyTorch version depends on CUDA driver; see run_airsim_vla.slurm
+torch>=1.12.0
+transformers>=4.37.0,<4.40.0
+timm>=0.9.10,<1.0.0
+tokenizers>=0.15.0,<0.19
+Pillow>=10.0.0
+accelerate>=0.25.0
+sentencepiece
+huggingface_hub>=0.20.0

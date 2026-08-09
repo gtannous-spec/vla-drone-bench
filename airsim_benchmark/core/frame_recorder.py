@@ -2,15 +2,15 @@
 frame_recorder.py — Captures RGB frames from AirSim during flight.
 
 Runs as a daemon thread alongside telemetry, saving timestamped frames
-to disk. After the mission, frames can be stitched into a video with ffmpeg.
+to disk. Supports dual-camera split-screen recording (front + bottom).
+After the mission, frames can be stitched into a video.
 """
 
 import logging
-import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import airsim
 import cv2
@@ -23,13 +23,14 @@ class FrameRecorder:
     """Records camera frames from AirSim during flight.
 
     Creates its own AirSim client to avoid thread-safety issues.
+    Supports single-camera or dual-camera (split-screen) recording.
 
     Usage:
         recorder = FrameRecorder(output_dir="output/frames/task_1", fps=5)
         recorder.start()
         ...  # fly
         recorder.stop()
-        recorder.make_video()  # optional: stitch into mp4
+        recorder.make_video()
     """
 
     def __init__(
@@ -39,10 +40,14 @@ class FrameRecorder:
         camera_name: str = "front_center",
         fps: float = 5.0,
         save_format: str = "jpg",
+        split_screen: bool = True,
+        secondary_camera: str = "bottom_center",
     ):
         self._output_dir = Path(output_dir)
         self._vehicle_name = vehicle_name
         self._camera_name = camera_name
+        self._secondary_camera = secondary_camera
+        self._split_screen = split_screen
         self._interval = 1.0 / fps
         self._fps = fps
         self._save_format = save_format
@@ -62,13 +67,26 @@ class FrameRecorder:
     def start(self) -> None:
         """Start the frame recording thread."""
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_previous()
         self._stop_event.clear()
         self._frame_count = 0
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="frame_recorder"
         )
         self._thread.start()
-        logger.info(f"Frame recorder started — saving to {self._output_dir}")
+        mode = "split-screen" if self._split_screen else "single"
+        logger.info(f"Frame recorder started ({mode}) — saving to {self._output_dir}")
+
+    def _cleanup_previous(self) -> None:
+        """Remove old frames and videos from previous runs."""
+        old_frames = list(self._output_dir.glob(f"frame_*.{self._save_format}"))
+        old_videos = list(self._output_dir.glob("*.mp4"))
+        removed = 0
+        for f in old_frames + old_videos:
+            f.unlink()
+            removed += 1
+        if removed:
+            logger.info(f"Cleaned up {removed} old file(s) from {self._output_dir}")
 
     def stop(self) -> None:
         """Stop the frame recording thread."""
@@ -103,23 +121,42 @@ class FrameRecorder:
             self._stop_event.wait(timeout=sleep_time)
 
     def _capture_frame(self) -> None:
-        """Capture one frame and save to disk."""
+        """Capture frame(s) and save to disk. Supports split-screen layout."""
+        requests = [
+            airsim.ImageRequest(self._camera_name, airsim.ImageType.Scene, False, False)
+        ]
+        if self._split_screen:
+            requests.append(
+                airsim.ImageRequest(self._secondary_camera, airsim.ImageType.Scene, False, False)
+            )
+
         responses = self._client.simGetImages(
-            [airsim.ImageRequest(
-                self._camera_name, airsim.ImageType.Scene, False, False
-            )],
-            vehicle_name=self._vehicle_name,
+            requests, vehicle_name=self._vehicle_name
         )
 
         if not responses or responses[0].width == 0:
             return
 
-        img = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
-        img = img.reshape(responses[0].height, responses[0].width, 3)
+        front_img = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
+        front_img = front_img.reshape(responses[0].height, responses[0].width, 3)
+
+        if self._split_screen and len(responses) > 1 and responses[1].width > 0:
+            bottom_img = np.frombuffer(responses[1].image_data_uint8, dtype=np.uint8)
+            bottom_img = bottom_img.reshape(responses[1].height, responses[1].width, 3)
+
+            # Resize bottom to match front height, then stack side-by-side
+            h_front = front_img.shape[0]
+            scale = h_front / bottom_img.shape[0]
+            new_w = int(bottom_img.shape[1] * scale)
+            bottom_resized = cv2.resize(bottom_img, (new_w, h_front))
+
+            combined = np.hstack([front_img, bottom_resized])
+        else:
+            combined = front_img
 
         filename = f"frame_{self._frame_count:06d}.{self._save_format}"
         filepath = self._output_dir / filename
-        cv2.imwrite(str(filepath), img)
+        cv2.imwrite(str(filepath), combined)
         self._frame_count += 1
 
     def make_video(self, output_path: Optional[str] = None, cleanup_frames: bool = False) -> Optional[str]:

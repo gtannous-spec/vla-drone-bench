@@ -120,7 +120,8 @@ class BenchmarkRunner:
                 fps=self._record_fps,
             )
 
-        # Execute FSM (telemetry starts inside after IDLE phase settles)
+        # Enable image capture if controller needs visual input (VLA or VLM)
+        needs_images = hasattr(self._controller, '_vla') or hasattr(self._controller, '_vlm')
         fsm = DroneFSM(
             client=client,
             controller=self._controller,
@@ -128,6 +129,7 @@ class BenchmarkRunner:
             takeoff_altitude=self._takeoff_altitude,
             mission_timeout=self._mission_timeout,
             nav_speed=self._nav_speed,
+            capture_images=needs_images,
         )
 
         # Start recorder just before execution

@@ -155,6 +155,15 @@ class TelemetryThread:
             col_pos = (col_info.position.x_val,
                        col_info.position.y_val,
                        col_info.position.z_val)
+
+            # Ignore ground-contact collisions during IDLE/TAKEOFF (spawn artifacts)
+            if self._current_phase in ("IDLE", "TAKEOFF"):
+                logger.debug(
+                    f"Ignoring spawn collision with '{col_info.object_name}' "
+                    f"during {self._current_phase}"
+                )
+                return
+
             event = CollisionEvent(
                 timestamp=now,
                 object_name=col_info.object_name,
@@ -162,7 +171,6 @@ class TelemetryThread:
             )
             with self._lock:
                 self._collisions.append(event)
-            # Only log once per object to avoid flooding the log
             seen_objects = {c.object_name for c in self._collisions[:-1]}
             if event.object_name not in seen_objects:
                 logger.warning(f"Collision with '{event.object_name}' "

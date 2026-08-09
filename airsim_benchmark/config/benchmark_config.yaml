@@ -11,9 +11,22 @@ arrival_tolerance: 1.5          # metres — how close counts as "arrived"
 takeoff_altitude: -10.0         # NED: negative = above ground
 nav_speed: 5.0                  # default cruise speed (m/s)
 land_speed: 1.0                 # descent speed during landing (m/s)
-mission_timeout: 90             # seconds — abort if not DONE by this time
+mission_timeout: 120            # seconds — abort if not DONE by this time
 telemetry_rate_hz: 10           # trajectory logging frequency
-vla_inference_hz: 2             # OpenVLA inference rate (future use)
+vla_inference_hz: 2             # OpenVLA inference rate (Hz)
+vla_waypoint_scale: 15.0        # VLA delta → waypoint distance multiplier
+vla_convergence_threshold: 0.005 # action norm below which VLA declares "arrived"
+vla_max_hops: 50                # max VLA navigation iterations per task
+vla_min_hops_before_convergence: 8  # ignore convergence signals before this many hops
+vla_goal_bias: 0.3              # blend 30% goal direction into VLA output
+vla_fallback_to_coords: true    # use coordinate proximity as fallback goal check
+
+# ── VLM controller settings ──────────────────────────────────────────────────
+vlm_model: "OpenGVLab/InternVL2-8B"  # HuggingFace model ID or local path
+vlm_query_hz: 1                      # VLM query rate (slower than VLA)
+vlm_confidence_threshold: 0.3        # below this, pure classical fallback
+vlm_waypoint_scale: 15.0             # max hop distance (m)
+vlm_max_hops: 40                     # max navigation iterations per task
 
 tasks:
   - id: 1
