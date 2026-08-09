@@ -47,6 +47,7 @@ class DroneFSM:
         takeoff_altitude: float = -5.0,
         mission_timeout: float = 90.0,
         nav_speed: float = 5.0,
+        capture_images: bool = False,
     ):
         self._client = client
         self._controller = controller
@@ -54,6 +55,7 @@ class DroneFSM:
         self._takeoff_altitude = takeoff_altitude
         self._mission_timeout = mission_timeout
         self._nav_speed = nav_speed
+        self._capture_images = capture_images
         self._phase = FlightPhase.IDLE
         self._start_time: float = 0.0
         self._success: bool = False
@@ -136,22 +138,37 @@ class DroneFSM:
         self._telemetry.current_phase = self._phase.name
         logger.info("FSM → NAVIGATE: controller active")
 
+        consecutive_errors = 0
+        max_consecutive_errors = 3
+
         while True:
             self._check_timeout()
 
             state = self._get_drone_state()
 
-            # Check goal before issuing a new move command
             if self._controller.is_goal_reached(state):
                 self._success = True
                 logger.info("Goal reached — transitioning to LAND")
                 break
 
-            action = self._controller.get_action(state)
+            try:
+                action = self._controller.get_action(state)
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(
+                    f"Controller error ({consecutive_errors}/{max_consecutive_errors}): {e}"
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    raise
+                time.sleep(0.5)
+                continue
 
-            # Use a short AirSim timeout so we can re-check mission timeout
             remaining = self._mission_timeout - (time.time() - self._start_time)
-            move_timeout = min(30.0, max(5.0, remaining))
+            if self._capture_images:
+                move_timeout = min(5.0, max(2.0, remaining))
+            else:
+                move_timeout = min(30.0, max(5.0, remaining))
 
             self._client.move_to(
                 action.target_position[0],
@@ -161,7 +178,6 @@ class DroneFSM:
                 timeout_sec=move_timeout,
             )
 
-            # Re-check after move completes
             state = self._get_drone_state()
             if self._controller.is_goal_reached(state):
                 self._success = True
@@ -194,9 +210,12 @@ class DroneFSM:
 
     def _get_drone_state(self) -> DroneState:
         """Build a DroneState snapshot from current telemetry."""
+        image = None
+        if self._capture_images:
+            image = self._client.get_camera_image()
         return DroneState(
             position=self._client.get_position(),
             velocity=self._client.get_velocity(),
             orientation=self._client.get_orientation(),
-            image=None,
+            image=image,
         )

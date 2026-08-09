@@ -16,6 +16,7 @@ Prerequisites:
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -23,11 +24,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from airsim_benchmark.controllers.classical_controller import ClassicalWaypointController
+from airsim_benchmark.controllers.vla_controller import VLAHybridController
+from airsim_benchmark.controllers.vlm_controller import VLMController
 from airsim_benchmark.runner.benchmark_runner import BenchmarkRunner
 
 
 CONTROLLERS = {
     "classical": ClassicalWaypointController,
+    "vla": VLAHybridController,
+    "vlm": VLMController,
 }
 
 
@@ -97,6 +102,22 @@ def main():
         default=5.0,
         help="Frame capture rate when recording (default: 5 fps)",
     )
+    parser.add_argument(
+        "--model-path",
+        default=None,
+        help="Path to VLA model weights (required for --controller vla)",
+    )
+    parser.add_argument(
+        "--vlm-model",
+        default=None,
+        help="HuggingFace model ID or local path for VLM (default: from config)",
+    )
+    parser.add_argument(
+        "--waypoint-scale",
+        type=float,
+        default=None,
+        help="VLA waypoint scale factor (default: from config or 15.0)",
+    )
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -115,11 +136,40 @@ def main():
     arrival_tol = args.arrival_tolerance or cfg.get("arrival_tolerance", 1.5)
     nav_speed = args.nav_speed or cfg.get("nav_speed", 5.0)
 
-    ControllerClass = CONTROLLERS[args.controller]
-    controller = ControllerClass(
-        arrival_tolerance=arrival_tol,
-        nav_speed=nav_speed,
-    )
+    if args.controller == "vlm":
+        vlm_model = args.vlm_model or cfg.get("vlm_model", "OpenGVLab/InternVL2-8B")
+        controller = VLMController(
+            model_path=vlm_model,
+            arrival_tolerance=arrival_tol,
+            nav_speed=nav_speed,
+            waypoint_scale=cfg.get("vlm_waypoint_scale", 15.0),
+            confidence_threshold=cfg.get("vlm_confidence_threshold", 0.3),
+            max_hops=cfg.get("vlm_max_hops", 40),
+        )
+    elif args.controller == "vla":
+        model_path = args.model_path or os.path.expanduser("~/models/openvla-7b")
+        if not Path(model_path).exists():
+            logger.error(f"VLA model not found at: {model_path}")
+            logger.error("Download with: python -m airsim_benchmark.scripts.download_model")
+            sys.exit(1)
+        waypoint_scale = args.waypoint_scale or cfg.get("vla_waypoint_scale", 15.0)
+        controller = VLAHybridController(
+            model_path=model_path,
+            arrival_tolerance=arrival_tol,
+            nav_speed=nav_speed,
+            waypoint_scale=waypoint_scale,
+            convergence_threshold=cfg.get("vla_convergence_threshold", 0.005),
+            max_hops=cfg.get("vla_max_hops", 50),
+            min_hops_before_convergence=cfg.get("vla_min_hops_before_convergence", 8),
+            goal_bias=cfg.get("vla_goal_bias", 0.3),
+            fallback_to_coords=cfg.get("vla_fallback_to_coords", True),
+        )
+    else:
+        ControllerClass = CONTROLLERS[args.controller]
+        controller = ControllerClass(
+            arrival_tolerance=arrival_tol,
+            nav_speed=nav_speed,
+        )
 
     logger.info(f"Controller: {args.controller}")
     logger.info(f"Config: {config_path}")

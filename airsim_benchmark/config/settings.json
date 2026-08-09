@@ -31,6 +31,24 @@
           "Pitch": -10.0,
           "Roll": 0.0,
           "Yaw": 0.0
+        },
+        "bottom_center": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 640,
+              "Height": 480,
+              "FOV_Degrees": 90,
+              "AutoExposureSpeed": 100,
+              "MotionBlurAmount": 0
+            }
+          ],
+          "X": 0.0,
+          "Y": 0.0,
+          "Z": 0.1,
+          "Pitch": -90.0,
+          "Roll": 0.0,
+          "Yaw": 0.0
         }
       },
       "Sensors": {
