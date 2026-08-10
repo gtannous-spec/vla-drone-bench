@@ -32,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from airsim_benchmark.controllers.classical_controller import ClassicalWaypointController
 from airsim_benchmark.controllers.vla_controller import VLAHybridController
 from airsim_benchmark.controllers.vlm_controller import VLMController
+from airsim_benchmark.controllers.openfly_controller import OpenFlyController
+from airsim_benchmark.controllers.drl_controller import DRLController
 from airsim_benchmark.runner.benchmark_runner import BenchmarkRunner
 
 
@@ -39,6 +41,8 @@ CONTROLLERS = {
     "classical": ClassicalWaypointController,
     "vla": VLAHybridController,
     "vlm": VLMController,
+    "openfly": OpenFlyController,
+    "drl": DRLController,
 }
 
 
@@ -142,7 +146,19 @@ def main():
     arrival_tol = args.arrival_tolerance or cfg.get("arrival_tolerance", 1.5)
     nav_speed = args.nav_speed or cfg.get("nav_speed", 5.0)
 
-    if args.controller == "vlm":
+    if args.controller == "openfly":
+        model_path = args.model_path or cfg.get(
+            "openfly_model", "IPEC-COMMUNITY/openfly-agent-7b"
+        )
+        controller = OpenFlyController(
+            model_path=model_path,
+            arrival_tolerance=arrival_tol,
+            nav_speed=nav_speed,
+            waypoint_scale=args.waypoint_scale or cfg.get("vla_waypoint_scale", 15.0),
+            max_hops=cfg.get("vla_max_hops", 50),
+            goal_bias=cfg.get("vla_goal_bias", 0.2),
+        )
+    elif args.controller == "vlm":
         vlm_model = args.vlm_model or cfg.get("vlm_model", "OpenGVLab/InternVL2-8B")
         controller = VLMController(
             model_path=vlm_model,
@@ -151,6 +167,13 @@ def main():
             waypoint_scale=cfg.get("vlm_waypoint_scale", 15.0),
             confidence_threshold=cfg.get("vlm_confidence_threshold", 0.3),
             max_hops=cfg.get("vlm_max_hops", 40),
+        )
+    elif args.controller == "drl":
+        policy_path = args.model_path or ""
+        controller = DRLController(
+            policy_path=policy_path,
+            arrival_tolerance=arrival_tol,
+            nav_speed=nav_speed,
         )
     elif args.controller == "vla":
         model_path = args.model_path or os.path.expanduser("~/models/openvla-7b")

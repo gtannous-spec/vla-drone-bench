@@ -37,7 +37,7 @@ set -uo pipefail
 PROJ_DIR="${SLURM_SUBMIT_DIR:-/users/ogal/gtannous/vla-proj}"
 TASKS="${TASKS:-1 2 3 4 5}"
 CONTROLLER="${CONTROLLER:-vlm}"
-MODEL_PATH="${MODEL_PATH:-$HOME/models/openvla-7b}"
+MODEL_PATH="${MODEL_PATH:-IPEC-COMMUNITY/openfly-agent-7b}"
 VLM_MODEL="${VLM_MODEL:-OpenGVLab/InternVL2-8B}"
 WAYPOINT_SCALE="${WAYPOINT_SCALE:-15.0}"
 SKIP_AIRSIM="${SKIP_AIRSIM:-1}"
@@ -338,12 +338,11 @@ $PIP install --quiet --user \
 # Transformers + VLM deps
 echo "      Installing transformers + VLM deps..."
 $PIP install --quiet --user --prefer-binary \
-    'transformers>=4.40.0,<5.0' \
+    'transformers>=4.47.0,<5.0' \
     'tokenizers>=0.19.0' \
     'timm>=0.9.10,<1.0.0' \
     'Pillow>=10.0.0' \
     'accelerate>=0.25.0' \
-    'sentencepiece' \
     'protobuf>=3.20.0' \
     'huggingface_hub>=0.20.0' \
     'einops' \
@@ -399,16 +398,9 @@ print(f'      Model cached at: {path}')
         }
     fi
 elif [[ -d "$MODEL_PATH" ]] && [[ -f "$MODEL_PATH/config.json" ]]; then
-    echo "      VLA model found at $MODEL_PATH"
+    echo "      Model found at $MODEL_PATH"
 else
-    echo "      VLA model not found at $MODEL_PATH — downloading..."
-    python3 -m airsim_benchmark.scripts.download_model \
-        --model-id openvla/openvla-7b \
-        --output "$MODEL_PATH"
-    if [[ $? -ne 0 ]]; then
-        echo "      ERROR: Model download failed."
-        exit 1
-    fi
+    echo "      Model: $MODEL_PATH (will download from HuggingFace on first load)"
 fi
 
 # ── Step 3: Deploy AirSim settings.json ──────────────────────────────────────
@@ -475,7 +467,9 @@ if [[ "$RECORD_FRAMES" == "1" ]]; then
 fi
 
 CONTROLLER_ARGS="--controller $CONTROLLER"
-if [[ "$CONTROLLER" == "vlm" ]]; then
+if [[ "$CONTROLLER" == "openfly" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path ${MODEL_PATH:-}"
+elif [[ "$CONTROLLER" == "vlm" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --vlm-model $VLM_MODEL"
 elif [[ "$CONTROLLER" == "vla" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path $MODEL_PATH --waypoint-scale $WAYPOINT_SCALE"

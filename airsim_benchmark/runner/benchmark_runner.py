@@ -122,8 +122,11 @@ class BenchmarkRunner:
                 fps=self._record_fps,
             )
 
-        # Enable image capture if controller needs visual input (VLA or VLM)
-        needs_images = hasattr(self._controller, '_vla') or hasattr(self._controller, '_vlm')
+        needs_images = (
+            hasattr(self._controller, '_vla')
+            or hasattr(self._controller, '_vlm')
+            or hasattr(self._controller, '_model')
+        )
         fsm = DroneFSM(
             client=client,
             controller=self._controller,
