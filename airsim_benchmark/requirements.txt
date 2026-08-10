@@ -15,5 +15,5 @@ timm>=0.9.10,<1.0.0
 tokenizers>=0.15.0,<0.19
 Pillow>=10.0.0
 accelerate>=0.25.0
-sentencepiece
+sentencepiece>=0.1.97,<0.2.0
 huggingface_hub>=0.20.0

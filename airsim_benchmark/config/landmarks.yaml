@@ -1,0 +1,75 @@
+# Privileged NED catalog for COLLECTION ONLY. The trained model never sees these XYZ.
+# Poses snapped 2026-08-18 from data/airsim_objects.txt (AirSimNH simGetObjectPose).
+# Frame: AirSim NED metres. +x north, +y east, +z down.
+#
+# Dump has no colour and no Mailbox actor. red_car is the Car_* nearest the old
+# seed; mailbox is a driveway-end in front of that house (not a mailbox mesh).
+
+safe_spawns:
+  # Road_* centreline samples (not yards)
+  - [0.4, -1.0]
+  - [16.4, -1.0]
+  - [32.4, -1.0]
+  - [48.4, -1.0]
+  - [64.4, -1.0]
+  - [80.4, -1.0]
+  - [0.4, 15.0]
+  - [0.4, -17.0]
+
+landmarks:
+  red_car:
+    name: red car
+    kind: vehicle
+    # Car_58; old seed [50, 20, -1] was 17 m north of any car (empty lawn)
+    source_mesh: Car_58
+    position: [51.7, 3.1, 0.2]
+    radius_m: 8.0
+  rooftop_near_red_car:
+    name: rooftop near the red car
+    kind: rooftop
+    # Nearest elevated Roof_* cluster to Car_58 (~26 m). Old seed [55, 15, -8]
+    # had no roof within 22 m; z=-8 would descend through a single-story roof.
+    source_mesh: Roof_Apex_9
+    position: [26.4, 26.0, -3.3]
+    radius_m: 8.0
+  two_story_house:
+    name: two-story house
+    kind: house
+    # Centroid of Roof_* with z<=-6 around the old seed (cluster ~11 m west)
+    source_mesh: Roof_01_122
+    position: [60.7, -33.4, -6.8]
+    radius_m: 12.0
+  white_house:
+    name: white house
+    kind: house
+    # Tall Roof_Open_* cluster; old seed sat on the west eave
+    source_mesh: Roof_Open_2
+    position: [-29.5, 60.1, -8.3]
+    radius_m: 12.0
+  white_house_yard:
+    name: backyard behind the white house
+    kind: ground
+    source_mesh: Driveway_Half_3
+    position: [-43.6, 60.5, -1.3]
+    radius_m: 8.0
+  intersection:
+    name: intersection
+    kind: intersection
+    # Crossing of the +x road (y≈-1) and the +y road at x≈128; stop sign 5.5 m away
+    source_mesh: Road_40
+    position: [120.4, -1.0, 0.2]
+    radius_m: 15.0
+  mailbox:
+    name: mailbox
+    kind: mailbox
+    # No Mailbox_* in the dump. Old seed [30, -50] is inside a house (Kitchen_Unit).
+    # Driveway in front of that house — instruction still says mailbox.
+    source_mesh: Driveway_8th_50
+    position: [28.4, -42.5, 0.2]
+    radius_m: 6.0
+  main_road:
+    name: the road ahead
+    kind: driveway
+    source_mesh: Road_84
+    position: [40.4, -1.0, 0.2]
+    radius_m: 12.0

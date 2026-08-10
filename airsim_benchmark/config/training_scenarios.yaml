@@ -1,0 +1,144 @@
+paraphrase_wrappers:
+  - "{instruction}"
+  - "Navigate: {instruction}"
+  - "Your task is to {instruction}"
+  - "{instruction}. Maintain safe altitude."
+  - "Mission objective: {instruction}"
+  - "Please {instruction}"
+
+scenarios:
+  - id: approach_red_car
+    intent: search_then_approach
+    landmark: red_car
+    weight: 0.10
+    max_hops: 30
+    min_altitude: 6.0
+    max_altitude: 16.0
+    templates:
+      - "Fly toward the red car parked in the neighborhood"
+      - "Go to the red car"
+      - "Head for the red car you can see"
+
+  - id: approach_white_house
+    intent: search_then_approach
+    landmark: white_house
+    weight: 0.08
+    max_hops: 30
+    min_altitude: 8.0
+    max_altitude: 18.0
+    templates:
+      - "Fly toward the white house"
+      - "Go to the white house with the roof ahead"
+
+  - id: approach_two_story
+    intent: search_then_approach
+    landmark: two_story_house
+    weight: 0.08
+    max_hops: 30
+    min_altitude: 8.0
+    max_altitude: 20.0
+    templates:
+      - "Fly toward the large two-story house"
+      - "Head for the two-story house"
+
+  - id: approach_intersection
+    intent: search_then_approach
+    landmark: intersection
+    weight: 0.07
+    max_hops: 30
+    min_altitude: 6.0
+    max_altitude: 15.0
+    templates:
+      - "Fly toward the intersection"
+      - "Go to the road intersection"
+
+  - id: approach_mailbox
+    intent: search_then_approach
+    landmark: mailbox
+    weight: 0.07
+    max_hops: 25
+    min_altitude: 4.0
+    max_altitude: 12.0
+    templates:
+      - "Fly toward the mailbox"
+      - "Inspect the mailbox at the end of the driveway"
+
+  - id: land_roof_red_car
+    intent: land_on_surface
+    landmark: rooftop_near_red_car
+    weight: 0.15
+    max_hops: 35
+    min_altitude: 4.0
+    max_altitude: 20.0
+    templates:
+      - "Land on the closest rooftop to the red car"
+      - "Descend and land on the rooftop near the red car"
+
+  - id: land_ground
+    intent: land_ground
+    landmark: null
+    weight: 0.10
+    max_hops: 20
+    min_altitude: 3.0
+    max_altitude: 12.0
+    templates:
+      - "Land"
+      - "Descend and land on the ground"
+      - "Stop and land"
+
+  - id: climb
+    intent: climb
+    landmark: null
+    weight: 0.10
+    max_hops: 15
+    min_altitude: 8.0
+    max_altitude: 25.0
+    templates:
+      - "Climb higher"
+      - "Climb higher and fly over the rooftops"
+      - "Increase altitude"
+
+  - id: descend
+    intent: descend
+    landmark: null
+    weight: 0.10
+    max_hops: 15
+    min_altitude: 4.0
+    max_altitude: 18.0
+    templates:
+      - "Descend to a lower altitude"
+      - "Descend slightly"
+      - "Drop down to a lower height"
+
+  - id: turn_left
+    intent: ego_turn_left
+    landmark: null
+    weight: 0.05
+    max_hops: 12
+    min_altitude: 8.0
+    max_altitude: 16.0
+    templates:
+      - "Turn left"
+      - "Turn left and continue"
+
+  - id: turn_right
+    intent: ego_turn_right
+    landmark: null
+    weight: 0.05
+    max_hops: 12
+    min_altitude: 8.0
+    max_altitude: 16.0
+    templates:
+      - "Turn right"
+      - "Turn right and continue"
+
+  - id: turn_around
+    intent: ego_turn_around
+    landmark: null
+    weight: 0.05
+    max_hops: 16
+    min_altitude: 8.0
+    max_altitude: 16.0
+    templates:
+      - "Turn around"
+      - "Turn around and fly back the way you came"

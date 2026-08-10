@@ -12,6 +12,11 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+from airsim_benchmark.core.sync_rpc import SyncClient, SyncAddress
+import msgpackrpc
+msgpackrpc.Client = SyncClient
+msgpackrpc.Address = SyncAddress
+
 import airsim
 import cv2
 import numpy as np
@@ -99,8 +104,11 @@ class FrameRecorder:
 
     def _connect(self) -> None:
         """Create a dedicated client for image capture."""
+        logger.info("FrameRecorder thread: creating AirSim client...")
         self._client = airsim.MultirotorClient()
+        logger.info("FrameRecorder thread: calling confirmConnection()...")
         self._client.confirmConnection()
+        logger.info("FrameRecorder thread: connected successfully")
 
     def _run(self) -> None:
         """Main loop: connect and capture frames at configured rate."""

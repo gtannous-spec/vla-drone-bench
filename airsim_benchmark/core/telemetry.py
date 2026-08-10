@@ -15,6 +15,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from airsim_benchmark.core.sync_rpc import SyncClient, SyncAddress
+import msgpackrpc
+msgpackrpc.Client = SyncClient
+msgpackrpc.Address = SyncAddress
+
 import airsim
 import numpy as np
 
@@ -102,9 +107,11 @@ class TelemetryThread:
 
     def _connect(self) -> None:
         """Create a dedicated read-only client for telemetry polling."""
+        logger.info("Telemetry thread: creating AirSim client...")
         self._telem_client = airsim.MultirotorClient()
+        logger.info("Telemetry thread: calling confirmConnection()...")
         self._telem_client.confirmConnection()
-        logger.debug("Telemetry client connected.")
+        logger.info("Telemetry thread: connected successfully")
 
     def _run(self) -> None:
         """Main loop: connect own client, then poll at configured rate."""

@@ -19,6 +19,14 @@ from .telemetry import TelemetryThread
 logger = logging.getLogger(__name__)
 
 
+def should_ground_land(instruction: str) -> bool:
+    """True only for street/ground landings, never rooftop landings."""
+    text = instruction.lower()
+    if "rooftop" in text or "roof" in text:
+        return False
+    return "land" in text
+
+
 class FlightPhase(Enum):
     IDLE = auto()
     TAKEOFF = auto()
@@ -68,8 +76,13 @@ class DroneFSM:
     def success(self) -> bool:
         return self._success
 
-    def execute(self) -> bool:
+    def execute(self, land_at_end: bool = True) -> bool:
         """Run the full FSM from IDLE through DONE.
+
+        Args:
+            land_at_end: If True, descend and disarm after navigate.
+                Multi-leg missions pass False so later legs can continue
+                from the air (rooftop landings must not street-land).
 
         Returns:
             True if the mission completed successfully (goal reached),
@@ -80,10 +93,13 @@ class DroneFSM:
 
         try:
             self._phase_idle()
+            logger.info("Starting telemetry thread...")
             self._telemetry.start()
+            logger.info("Telemetry thread started (connecting in background)")
             self._phase_takeoff()
             self._phase_navigate()
-            self._phase_land()
+            if land_at_end:
+                self._phase_land()
             self._phase_done()
         except TimeoutError as e:
             logger.error(f"Mission timeout: {e}")
@@ -183,6 +199,20 @@ class DroneFSM:
                 self._success = True
                 logger.info("Goal reached — transitioning to LAND")
                 break
+
+    def _run_navigate_phase(self) -> bool:
+        """Public entry for running just the navigate phase (for multi-leg missions).
+
+        Resets the timer and runs navigation until the controller says goal reached
+        or the timeout expires. Does NOT takeoff or land.
+        """
+        self._start_time = time.time()
+        self._success = False
+        try:
+            self._phase_navigate()
+        except Exception as e:
+            logger.error(f"Navigate phase error: {e}")
+        return self._success
 
     def _phase_land(self) -> None:
         """LAND: Descend and disarm."""

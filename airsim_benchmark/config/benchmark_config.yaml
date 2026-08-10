@@ -18,7 +18,7 @@ vla_waypoint_scale: 15.0        # VLA delta → waypoint distance multiplier
 vla_convergence_threshold: 0.005 # action norm below which VLA declares "arrived"
 vla_max_hops: 50                # max VLA navigation iterations per task
 vla_min_hops_before_convergence: 8  # ignore convergence signals before this many hops
-vla_goal_bias: 0.3              # blend 30% goal direction into VLA output
+vla_goal_bias: 0.6              # blend 60% goal direction into VLA output
 vla_fallback_to_coords: true    # use coordinate proximity as fallback goal check
 
 # ── VLM controller settings ──────────────────────────────────────────────────
@@ -78,3 +78,399 @@ tasks:
       max_altitude: 12.0
       max_speed: 5.0
       geofence_radius: 150.0
+
+# =============================================================================
+# GPS-Free Multi-Landmark Missions
+# Each mission has a global description and multiple legs with per-leg prompts.
+# The drone navigates using ONLY camera images and language instructions
+# (goal_bias=0.0, no coordinate assistance).
+# =============================================================================
+
+mission_timeout_long: 600       # seconds — longer timeout for multi-leg missions
+mission_default_hops_per_leg: 25
+
+missions:
+  - id: 1
+    name: "Road Following North"
+    description: "Follow the main road heading north through the neighborhood"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 8.0
+      max_altitude: 15.0
+      max_speed: 6.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly straight ahead following the road in front of you"
+        max_hops: 30
+      - instruction: "Continue flying forward along the road"
+        max_hops: 25
+      - instruction: "Slow down and descend slightly as you approach the end of the road"
+        max_hops: 20
+
+  - id: 2
+    name: "House-to-House Navigation"
+    description: "Navigate between visible houses using only visual landmarks"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 8.0
+      max_altitude: 20.0
+      max_speed: 6.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly toward the large two-story house on the left side of the street"
+        max_hops: 25
+      - instruction: "Turn right and fly toward the white house with the red roof"
+        max_hops: 25
+      - instruction: "Descend and fly toward the house at the end of the cul-de-sac"
+        max_hops: 25
+
+  - id: 3
+    name: "Perimeter Patrol"
+    description: "Fly a patrol loop around the neighborhood block"
+    start: [0.0, 0.0, -2.0]
+    timeout: 400
+    constraints:
+      min_altitude: 8.0
+      max_altitude: 15.0
+      max_speed: 8.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly north along the main road"
+        max_hops: 25
+      - instruction: "Turn right and fly east past the houses"
+        max_hops: 25
+      - instruction: "Turn right and fly south back toward your starting area"
+        max_hops: 25
+      - instruction: "Turn right and fly west to complete the patrol loop"
+        max_hops: 25
+
+  - id: 4
+    name: "Intersection Approach"
+    description: "Navigate to the major intersection and survey the area"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 5.0
+      max_altitude: 15.0
+      max_speed: 5.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly forward over the road ahead of you"
+        max_hops: 30
+      - instruction: "Look for the intersection and fly toward it"
+        max_hops: 25
+      - instruction: "Circle above the intersection slowly"
+        max_hops: 20
+
+  - id: 5
+    name: "Tree Line Survey"
+    description: "Follow the line of trees along the street"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 8.0
+      max_altitude: 20.0
+      max_speed: 5.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly forward and follow the row of trees on your right"
+        max_hops: 30
+      - instruction: "Continue following the trees ahead"
+        max_hops: 25
+      - instruction: "Descend and hover near the last tree"
+        max_hops: 15
+
+  - id: 6
+    name: "Street-Level Exploration"
+    description: "Fly low along the street exploring the neighborhood at close range"
+    start: [0.0, 0.0, -2.0]
+    timeout: 350
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 10.0
+      max_speed: 4.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly low over the road straight ahead"
+        max_hops: 25
+      - instruction: "Turn left and fly along the side street"
+        max_hops: 25
+      - instruction: "Turn around and fly back the way you came"
+        max_hops: 25
+
+  - id: 7
+    name: "Rooftop Inspection Tour"
+    description: "Fly over rooftops inspecting houses from above"
+    start: [0.0, 0.0, -2.0]
+    timeout: 400
+    constraints:
+      min_altitude: 10.0
+      max_altitude: 25.0
+      max_speed: 5.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Climb higher and fly over the rooftops of the houses ahead"
+        max_hops: 25
+      - instruction: "Continue flying over the neighborhood looking down at the houses"
+        max_hops: 25
+      - instruction: "Turn and fly over the next row of houses"
+        max_hops: 25
+      - instruction: "Descend back to a lower altitude"
+        max_hops: 15
+
+  - id: 8
+    name: "Driveway-to-Driveway"
+    description: "Navigate at low altitude between driveways"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 5.0
+      max_altitude: 12.0
+      max_speed: 4.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly toward the nearest driveway on the right side of the road"
+        max_hops: 20
+      - instruction: "Move to the next driveway further down the street"
+        max_hops: 20
+      - instruction: "Continue to the driveway at the end of the block"
+        max_hops: 20
+
+  - id: 9
+    name: "Long-Range North Traverse"
+    description: "Fly a long distance northward through the entire neighborhood"
+    start: [0.0, 0.0, -2.0]
+    timeout: 500
+    constraints:
+      min_altitude: 10.0
+      max_altitude: 20.0
+      max_speed: 8.0
+      geofence_radius: 800.0
+    legs:
+      - instruction: "Fly straight north as far as you can see"
+        max_hops: 40
+      - instruction: "Keep going north past all the houses"
+        max_hops: 40
+      - instruction: "Slow down and prepare to stop"
+        max_hops: 20
+
+  - id: 10
+    name: "Figure-Eight Pattern"
+    description: "Fly a figure-eight pattern over the neighborhood"
+    start: [0.0, 0.0, -2.0]
+    timeout: 500
+    constraints:
+      min_altitude: 10.0
+      max_altitude: 20.0
+      max_speed: 6.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly forward and curve to the right in a wide arc"
+        max_hops: 25
+      - instruction: "Continue curving right until you are heading back toward your start"
+        max_hops: 25
+      - instruction: "Now curve to the left in a wide arc"
+        max_hops: 25
+      - instruction: "Continue curving left until you complete the figure eight"
+        max_hops: 25
+
+# =============================================================================
+# Long-Duration Missions (6-8 legs, extended timeouts)
+# Designed for thesis evaluation of sustained VLA navigation with global
+# context and per-leg operator instructions.
+# =============================================================================
+
+  - id: 11
+    name: "Full Neighborhood Survey"
+    description: "Conduct a comprehensive survey of the entire neighborhood from multiple angles and altitudes"
+    start: [0.0, 0.0, -2.0]
+    timeout: 1800
+    constraints:
+      min_altitude: 8.0
+      max_altitude: 25.0
+      max_speed: 6.0
+      geofence_radius: 800.0
+    legs:
+      - instruction: "Climb to a high altitude and fly north over the main road"
+        max_hops: 30
+      - instruction: "Turn right and fly east over the row of houses"
+        max_hops: 25
+      - instruction: "Descend slightly and turn right to fly south along the eastern edge"
+        max_hops: 30
+      - instruction: "Turn right and fly west back over the houses toward the start"
+        max_hops: 25
+      - instruction: "Climb higher and fly north again over the center of the neighborhood"
+        max_hops: 30
+      - instruction: "Descend and slow down, circling over the cul-de-sac area"
+        max_hops: 20
+      - instruction: "Fly low over the driveways heading south"
+        max_hops: 25
+      - instruction: "Return to your starting area and prepare to land"
+        max_hops: 20
+
+  - id: 12
+    name: "Search and Inspect"
+    description: "Search the neighborhood for specific landmarks then inspect them at close range"
+    start: [0.0, 0.0, -2.0]
+    timeout: 1500
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 20.0
+      max_speed: 5.0
+      geofence_radius: 600.0
+    legs:
+      - instruction: "Fly forward at high altitude scanning the area below"
+        max_hops: 25
+      - instruction: "Descend and fly toward the group of houses on the left"
+        max_hops: 20
+      - instruction: "Fly low over the rooftops inspecting the houses below"
+        max_hops: 25
+      - instruction: "Climb back up and fly toward the road intersection ahead"
+        max_hops: 25
+      - instruction: "Circle the intersection at medium altitude"
+        max_hops: 20
+      - instruction: "Fly south along the road at low altitude"
+        max_hops: 30
+
+  - id: 13
+    name: "Multi-Altitude Traverse"
+    description: "Navigate the neighborhood at varying altitudes, alternating between high overview and low detail passes"
+    start: [0.0, 0.0, -2.0]
+    timeout: 1800
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 30.0
+      max_speed: 7.0
+      geofence_radius: 800.0
+    legs:
+      - instruction: "Climb to maximum altitude and fly straight north for a high overview"
+        max_hops: 30
+      - instruction: "Descend rapidly and fly low over the road"
+        max_hops: 20
+      - instruction: "Climb again and turn east over the houses"
+        max_hops: 25
+      - instruction: "Drop down and weave between the trees at low altitude"
+        max_hops: 25
+      - instruction: "Climb back up and fly south for a wide overview"
+        max_hops: 30
+      - instruction: "Descend and fly west along the street at rooftop level"
+        max_hops: 25
+      - instruction: "Climb to high altitude and return north toward start"
+        max_hops: 30
+
+  - id: 14
+    name: "Operator-Guided Patrol"
+    description: "Execute a complex patrol pattern with frequent direction changes as directed by the operator"
+    start: [0.0, 0.0, -2.0]
+    timeout: 1500
+    constraints:
+      min_altitude: 8.0
+      max_altitude: 18.0
+      max_speed: 5.0
+      geofence_radius: 600.0
+    legs:
+      - instruction: "Fly north along the main road"
+        max_hops: 20
+      - instruction: "Turn left and fly west past the houses"
+        max_hops: 20
+      - instruction: "Turn left again and fly south"
+        max_hops: 20
+      - instruction: "Turn right and fly toward the large house on the right"
+        max_hops: 20
+      - instruction: "Turn around and fly back the way you came"
+        max_hops: 20
+      - instruction: "Turn right at the intersection and continue east"
+        max_hops: 20
+      - instruction: "Slow down and descend, preparing to finish the patrol"
+        max_hops: 15
+      - instruction: "Fly back toward your starting position"
+        max_hops: 20
+
+  - id: 15
+    name: "Extended Road Following"
+    description: "Follow roads through the entire neighborhood, making turns at every intersection"
+    start: [0.0, 0.0, -2.0]
+    timeout: 1800
+    constraints:
+      min_altitude: 6.0
+      max_altitude: 12.0
+      max_speed: 4.0
+      geofence_radius: 800.0
+    legs:
+      - instruction: "Fly low and follow the road straight ahead"
+        max_hops: 35
+      - instruction: "When you reach the intersection, turn right and follow the new road"
+        max_hops: 30
+      - instruction: "Continue following the road as it curves"
+        max_hops: 30
+      - instruction: "Turn left at the next junction"
+        max_hops: 25
+      - instruction: "Follow this road until it ends at the cul-de-sac"
+        max_hops: 30
+      - instruction: "Turn around and fly back along the road"
+        max_hops: 35
+
+  - id: 16
+    name: "Red Car Rooftop Landing"
+    description: "Fly toward the red car, and then land on the closest rooftop to it"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 20.0
+      max_speed: 5.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly toward the red car parked in the neighborhood"
+        max_hops: 30
+      - instruction: "Land on the closest rooftop to the red car"
+        max_hops: 25
+
+  # One-prompt rooftop land, v12 eval only. Same spawn as 16. Does not replace 16.
+  - id: 17
+    name: "Rooftop Land Training Phrase"
+    description: "Single-leg land on the rooftop near the red car (training template)"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 20.0
+      max_speed: 5.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Descend and land on the rooftop near the red car"
+        max_hops: 40
+
+  - id: 18
+    name: "Rooftop Land Novel Phrase"
+    description: "Single-leg fly-and-land on the nearest rooftop (unseen wording)"
+    start: [0.0, 0.0, -2.0]
+    timeout: 300
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 20.0
+      max_speed: 5.0
+      geofence_radius: 500.0
+    legs:
+      - instruction: "Fly and land on the nearest rooftop"
+        max_hops: 40
+
+  - id: 19
+    name: "Red Car Patrol"
+    description: "Fly to the red car, circle around it, then return along the road"
+    start: [0.0, 0.0, -2.0]
+    timeout: 400
+    constraints:
+      min_altitude: 4.0
+      max_altitude: 25.0
+      max_speed: 6.0
+      geofence_radius: 800.0
+    legs:
+      - instruction: "Fly toward the red car in the neighborhood"
+        max_hops: 30
+      - instruction: "Circle around the red car"
+        max_hops: 15
+      - instruction: "Turn around and fly back along the road to where you started"
+        max_hops: 30

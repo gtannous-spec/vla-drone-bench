@@ -38,17 +38,34 @@ class NavigationHint:
 _CONFIDENCE_MAP = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3, "NONE": 0.0}
 
 NAVIGATION_PROMPT = """\
-You are the navigation system of a drone flying over a suburban neighborhood.
-You see this image from the front-facing camera.
+You are a drone navigation system. You see this image from the drone's front camera flying over a suburban neighborhood.
 
 Task: {instruction}
 
-Analyze the image and determine where the target is relative to the drone's \
-current forward heading. Respond in EXACTLY this format (4 lines, nothing else):
-HEADING: <integer from -180 to 180, negative=left, positive=right, 0=straight ahead>
-DISTANCE: <estimated meters to target, or UNKNOWN>
+Look at the image carefully. Where is the target object in this image?
+Answer with EXACTLY these 4 lines:
+POSITION: <FAR_LEFT, LEFT, CENTER_LEFT, CENTER, CENTER_RIGHT, RIGHT, FAR_RIGHT, or NOT_VISIBLE>
+DISTANCE: <CLOSE, MEDIUM, FAR, or UNKNOWN>
 CONFIDENCE: <HIGH, MEDIUM, LOW, or NONE>
-REASONING: <one sentence explaining what you see>"""
+REASONING: <one sentence about what you see and where the target is>"""
+
+_POSITION_TO_HEADING = {
+    "FAR_LEFT": -60.0,
+    "LEFT": -40.0,
+    "CENTER_LEFT": -20.0,
+    "CENTER": 0.0,
+    "CENTER_RIGHT": 20.0,
+    "RIGHT": 40.0,
+    "FAR_RIGHT": 60.0,
+    "NOT_VISIBLE": None,
+}
+
+_DISTANCE_TO_METERS = {
+    "CLOSE": 10.0,
+    "MEDIUM": 30.0,
+    "FAR": 60.0,
+    "UNKNOWN": 30.0,
+}
 
 
 def _parse_vlm_response(text: str) -> NavigationHint:
@@ -58,14 +75,33 @@ def _parse_vlm_response(text: str) -> NavigationHint:
     confidence = 0.0
     reasoning = ""
 
+    pos_match = re.search(
+        r"POSITION:\s*(FAR_LEFT|LEFT|CENTER_LEFT|CENTER|CENTER_RIGHT|RIGHT|FAR_RIGHT|NOT_VISIBLE)",
+        text, re.IGNORECASE
+    )
+    if pos_match:
+        pos_key = pos_match.group(1).upper()
+        heading_val = _POSITION_TO_HEADING.get(pos_key)
+        if heading_val is not None:
+            heading = heading_val
+        else:
+            confidence = 0.0
+
     heading_match = re.search(r"HEADING:\s*(-?\d+(?:\.\d+)?)", text)
-    if heading_match:
+    if heading_match and not pos_match:
         heading = float(heading_match.group(1))
         heading = max(-180.0, min(180.0, heading))
 
-    distance_match = re.search(r"DISTANCE:\s*(\d+(?:\.\d+)?)", text)
-    if distance_match:
-        distance = float(distance_match.group(1))
+    dist_match = re.search(
+        r"DISTANCE:\s*(CLOSE|MEDIUM|FAR|UNKNOWN)",
+        text, re.IGNORECASE
+    )
+    if dist_match:
+        distance = _DISTANCE_TO_METERS.get(dist_match.group(1).upper(), 30.0)
+    else:
+        num_dist = re.search(r"DISTANCE:\s*(\d+(?:\.\d+)?)", text)
+        if num_dist:
+            distance = float(num_dist.group(1))
 
     conf_match = re.search(r"CONFIDENCE:\s*(HIGH|MEDIUM|LOW|NONE)", text, re.IGNORECASE)
     if conf_match:
@@ -75,9 +111,45 @@ def _parse_vlm_response(text: str) -> NavigationHint:
     if reason_match:
         reasoning = reason_match.group(1).strip()
 
-    if not heading_match and not conf_match:
+    if not pos_match and not heading_match:
+        text_lower = text.lower()
+        if "not visible" in text_lower or "cannot see" in text_lower or "not seen" in text_lower:
+            confidence = 0.0
+        elif "far left" in text_lower or "far-left" in text_lower:
+            heading = -60.0
+        elif "far right" in text_lower or "far-right" in text_lower:
+            heading = 60.0
+        elif "center-left" in text_lower or "center left" in text_lower or "slightly left" in text_lower:
+            heading = -20.0
+        elif "center-right" in text_lower or "center right" in text_lower or "slightly right" in text_lower:
+            heading = 20.0
+        elif "left side" in text_lower or "to the left" in text_lower or "on the left" in text_lower:
+            heading = -40.0
+        elif "right side" in text_lower or "to the right" in text_lower or "on the right" in text_lower:
+            heading = 40.0
+        elif "left" in text_lower and "right" not in text_lower:
+            heading = -40.0
+        elif "right" in text_lower and "left" not in text_lower:
+            heading = 40.0
+        elif "center" in text_lower or "ahead" in text_lower or "directly ahead" in text_lower or "straight" in text_lower:
+            heading = 0.0
+
+        if confidence == 0.0 and not conf_match:
+            conf_inferred = any(w in text_lower for w in ["visible", "see", "parked", "ahead", "center", "left", "right"])
+            if conf_inferred:
+                confidence = 0.6
+
+    if not pos_match and not heading_match and not conf_match:
+        text_lower = text.lower()
+        if any(w in text_lower for w in ["see", "visible", "parked", "ahead", "car", "house", "roof"]):
+            confidence = 0.6
+        else:
+            confidence = 0.0
+            reasoning = f"Failed to parse VLM response: {text[:100]}"
+
+    if pos_match and pos_key == "NOT_VISIBLE":
         confidence = 0.0
-        reasoning = f"Failed to parse VLM response: {text[:100]}"
+        reasoning = f"Target not visible: {reasoning}"
 
     return NavigationHint(
         heading_offset_deg=heading,
@@ -142,16 +214,15 @@ class VLMInference:
             logger.warning(f"Unknown model family for '{model_path}', defaulting to llava")
 
     def _load_internvl(self, model_path: str, device: str) -> None:
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
-        self._model = AutoModel.from_pretrained(
+        from transformers import AutoModelForImageTextToText
+        self._processor = AutoProcessor.from_pretrained(model_path)
+        self._model = AutoModelForImageTextToText.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-            trust_remote_code=True,
         ).to(device).eval()
-        self._processor = None
+        self._tokenizer = None
+        logger.info(f"Loaded InternVL via native transformers (AutoModelForImageTextToText)")
 
     def _load_llava(self, model_path: str, device: str) -> None:
         self._processor = AutoProcessor.from_pretrained(
@@ -222,32 +293,28 @@ class VLMInference:
         return hint
 
     def _query_internvl(self, pil_img, prompt: str) -> str:
-        pixel_values = self._internvl_preprocess(pil_img).to(
-            self._device, dtype=torch.bfloat16
-        )
-        generation_config = dict(max_new_tokens=self._max_new_tokens, do_sample=False)
-        question = f"<image>\n{prompt}"
+        messages = [{"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": prompt},
+        ]}]
+        text = self._processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self._processor(
+            images=pil_img, text=text, return_tensors="pt"
+        ).to(self._device, dtype=torch.bfloat16)
 
         with torch.inference_mode():
-            response = self._model.chat(
-                self._tokenizer, pixel_values, question, generation_config
+            output_ids = self._model.generate(
+                **inputs, max_new_tokens=self._max_new_tokens, do_sample=False
             )
-        return response
+        input_len = inputs["input_ids"].shape[-1]
+        response = self._processor.decode(
+            output_ids[0][input_len:], skip_special_tokens=True
+        )
+        return response.strip()
 
-    def _internvl_preprocess(self, pil_img):
-        """Preprocess image for InternVL2 using torchvision transforms."""
-        from torchvision import transforms
+    # InternVL2 custom preprocessing removed — InternVL3 uses native AutoProcessor
 
-        MEAN = (0.485, 0.456, 0.406)
-        STD = (0.229, 0.224, 0.225)
-
-        transform = transforms.Compose([
-            transforms.Resize((448, 448), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=MEAN, std=STD),
-        ])
-        pixel_values = transform(pil_img.convert("RGB")).unsqueeze(0)
-        return pixel_values
+    # _internvl_preprocess removed — replaced by _internvl_load_image + _dynamic_preprocess
 
     def _query_llava(self, pil_img, prompt: str) -> str:
         conversation = [

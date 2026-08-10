@@ -26,7 +26,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=48G
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/users/ogal/gtannous/vla-proj/logs/vla_%j.out
 #SBATCH --error=/users/ogal/gtannous/vla-proj/logs/vla_%j.out
 
@@ -36,18 +36,35 @@ set -uo pipefail
 
 PROJ_DIR="${SLURM_SUBMIT_DIR:-/users/ogal/gtannous/vla-proj}"
 TASKS="${TASKS:-1 2 3 4 5}"
+# Supported controllers: classical, vla, vlm, openfly, llamauav, drl, twostage, detection, augmented
 CONTROLLER="${CONTROLLER:-vlm}"
-MODEL_PATH="${MODEL_PATH:-$HOME/models/openvla-7b}"
+MODEL_PATH="${MODEL_PATH:-IPEC-COMMUNITY/openfly-agent-7b}"
 VLM_MODEL="${VLM_MODEL:-OpenGVLab/InternVL2-8B}"
+DETECTION_MODEL="${DETECTION_MODEL:-IDEA-Research/grounding-dino-base}"
 WAYPOINT_SCALE="${WAYPOINT_SCALE:-15.0}"
 SKIP_AIRSIM="${SKIP_AIRSIM:-1}"
+GOAL_BIAS="${GOAL_BIAS:-}"
+RUN_MODE="${RUN_MODE:-task}"
+MISSION_IDS="${MISSION_IDS:-}"
 RECORD_FRAMES="${RECORD_FRAMES:-1}"
 RECORD_FPS="${RECORD_FPS:-5}"
+LORA_PATH="${LORA_PATH:-}"
+REGRESSION_HEAD_PATH="${REGRESSION_HEAD_PATH:-}"
+# v12+ checkpoints store PEFT adapters next to regression_head.pt. Eval that
+# loads only the MLP sees stock 7B hidden states and flies north forever.
+if [[ -n "$REGRESSION_HEAD_PATH" && -z "$LORA_PATH" ]]; then
+    LORA_PATH="$REGRESSION_HEAD_PATH"
+fi
 AIRSIM_BINARY="${AIRSIM_BINARY:-$HOME/AirSim/AirSimNH/AirSimNH/LinuxNoEditor/AirSimNH.sh}"
 AIRSIM_SETTINGS_SRC="$PROJ_DIR/airsim_benchmark/config/settings.json"
 AIRSIM_SETTINGS_DST="$HOME/Documents/AirSim/settings.json"
 
-OUTPUT_DIR="$PROJ_DIR/logs/airsim_output/$CONTROLLER"
+# Include goal_bias in output dir name to allow parallel runs
+if [[ -n "$GOAL_BIAS" ]]; then
+    OUTPUT_DIR="$PROJ_DIR/logs/airsim_output/${CONTROLLER}_bias${GOAL_BIAS}"
+else
+    OUTPUT_DIR="$PROJ_DIR/logs/airsim_output/$CONTROLLER"
+fi
 TRAJ_DIR="$OUTPUT_DIR/trajectories"
 PLOT_DIR="$OUTPUT_DIR/plots"
 CONFIG="$PROJ_DIR/airsim_benchmark/config/benchmark_config.yaml"
@@ -63,10 +80,16 @@ echo " GPU:        $(nvidia-smi --query-gpu=name,memory.total --format=csv,nohea
 echo " Controller: $CONTROLLER"
 if [[ "$CONTROLLER" == "vlm" ]]; then
     echo " VLM:        $VLM_MODEL"
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    echo " Model:      LLaMA-UAV (${LLAMAUAV_MODEL:-$HOME/models/llama-uav})"
 else
     echo " Model:      $MODEL_PATH"
 fi
 echo " Scale:      $WAYPOINT_SCALE"
+echo " Goal Bias:  ${GOAL_BIAS:-default}"
+echo " LoRA:       ${LORA_PATH:-none}"
+echo " Reg Head:   ${REGRESSION_HEAD_PATH:-none}"
+echo " Mode:       $RUN_MODE"
 echo " Tasks:      $TASKS"
 echo " Output:     $OUTPUT_DIR"
 echo " Start:      $(date)"
@@ -94,7 +117,19 @@ trap cleanup EXIT
 
 echo ""
 echo "[1/6] Installing Python dependencies..."
-# Upgrade pip first to avoid old resolver bugs (use python3 -m pip afterward)
+echo "      Python: $(python3 --version 2>&1)"
+
+# Python 3.12+ enforces PEP 668 (externally managed environment).
+# Allow --user installs on HPC nodes where we don't control the system Python.
+export PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Bootstrap pip if not available (dlc2 nodes lack pip and ensurepip)
+if ! python3 -m pip --version &>/dev/null; then
+    echo "      pip not found — bootstrapping via get-pip.py..."
+    curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+    python3 /tmp/get-pip.py --user --quiet 2>&1 | tail -3
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 python3 -m pip install --quiet --user --upgrade pip 2>&1 | tail -1
 PIP="python3 -m pip"
 
@@ -103,14 +138,192 @@ _pip_filter() { grep -v "Error parsing dependencies of" || true; }
 
 # Core deps (prefer binary wheels to avoid source-build failures)
 $PIP install --quiet --user --prefer-binary \
-    'numpy>=1.24.0' 'msgpack-rpc-python' \
-    2>&1 | _pip_filter | tail -3
-$PIP install --quiet --user --prefer-binary \
-    'airsim>=1.8.1' \
+    'numpy>=1.24.0' \
     'matplotlib>=3.7.0' \
     'pyyaml>=6.0' \
     'opencv-python>=4.8.0' \
+    'msgpack' \
+    'Pillow>=10.0.0' \
     2>&1 | _pip_filter | tail -3
+
+# airsim + msgpack-rpc-python have build deps incompatible with Python 3.12:
+#   - airsim's setup.py imports itself during build → fails
+#   - msgpack-rpc-python requires tornado<5 which uses collections.MutableMapping (removed in 3.10)
+# Strategy: install runtime deps, download source tarballs directly from PyPI
+# (bypassing pip's build system), extract the pure-Python packages, and copy
+# them into user site-packages.
+$PIP install --quiet --user 'setuptools' 'tornado>=6.0' 'msgpack>=1.0' 'nest_asyncio' \
+    2>&1 | _pip_filter | tail -1
+
+_AIRSIM_TMP=$(mktemp -d)
+_SITE=$(python3 -c "import site; print(site.getusersitepackages())")
+mkdir -p "$_SITE"
+echo "      Installing airsim (Python 3.12 direct-extract workaround)..."
+
+# Download source tarballs directly from PyPI (no build step)
+_download_pypi_sdist() {
+    local pkg_name="$1" dest_dir="$2"
+    local url
+    url=$(python3 -c "
+import urllib.request, json
+data = json.loads(urllib.request.urlopen('https://pypi.org/pypi/$pkg_name/json').read())
+sdists = [u['url'] for u in data['urls'] if u['packagetype'] == 'sdist']
+if sdists: print(sdists[0])
+else: print('')
+" 2>/dev/null)
+    if [[ -n "$url" ]]; then
+        curl -sSL "$url" -o "$dest_dir/$pkg_name.tar.gz" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+
+_download_pypi_sdist "airsim" "$_AIRSIM_TMP" \
+    && echo "      Downloaded airsim source" \
+    || echo "      WARNING: airsim download failed"
+_download_pypi_sdist "msgpack-rpc-python" "$_AIRSIM_TMP" \
+    && echo "      Downloaded msgpack-rpc-python source" \
+    || echo "      WARNING: msgpack-rpc-python download failed"
+
+# Extract tarballs and copy pure-Python package dirs to site-packages
+for _tarball in "$_AIRSIM_TMP"/*.tar.gz; do
+    [ -f "$_tarball" ] && tar -xzf "$_tarball" -C "$_AIRSIM_TMP" 2>/dev/null
+done
+_installed=0
+for _pkg_dir in "$_AIRSIM_TMP"/*/airsim "$_AIRSIM_TMP"/*/msgpackrpc; do
+    if [ -d "$_pkg_dir" ]; then
+        cp -r "$_pkg_dir" "$_SITE/"
+        echo "      Extracted $(basename "$_pkg_dir") → site-packages"
+        _installed=$((_installed + 1))
+    fi
+done
+rm -rf "$_AIRSIM_TMP"
+
+if [[ $_installed -lt 2 ]]; then
+    echo "      WARNING: Only $_installed/2 packages extracted, trying pip fallback..."
+    $PIP install --quiet --user --no-build-isolation --no-deps 'airsim' \
+        2>&1 | _pip_filter | tail -2
+fi
+
+# Patch msgpackrpc for Tornado 6+ compatibility (tornado.platform.auto removed,
+# IOLoop.instance() deprecated, etc.)
+echo "      Patching msgpackrpc for Tornado 6 compatibility..."
+python3 << 'PATCH_SCRIPT'
+import pathlib, site
+
+sp = pathlib.Path(site.getusersitepackages()) / "msgpackrpc"
+if not sp.exists():
+    print("      WARNING: msgpackrpc not found in site-packages, skipping patch")
+    raise SystemExit(0)
+
+# ── address.py ──────────────────────────────────────────────────────────
+# tornado.platform.auto removed in tornado 6; set_close_exec is a no-op
+# on Python 3+ (CLOEXEC is set by default).
+patches = {
+    "address.py": [
+        ("from tornado.platform.auto import set_close_exec",
+         "def set_close_exec(fd): pass"),
+    ],
+}
+
+# ── loop.py ─────────────────────────────────────────────────────────────
+# IOLoop.instance() → IOLoop.current()  (deprecated in tornado 5)
+# PeriodicCallback 3rd arg changed from io_loop to jitter (float) in tornado 6
+patches["loop.py"] = [
+    ("IOLoop.instance()", "IOLoop.current()"),
+    ("ioloop.PeriodicCallback(callback, callback_time, self._ioloop)",
+     "ioloop.PeriodicCallback(callback, callback_time)"),
+    ("loop or ioloop.IOLoop()", "loop or ioloop.IOLoop.current()"),
+    # Remove make_current() — deprecated in tornado 6
+    ("self._ioloop.make_current()\n        self._periodic_callback = None",
+     "self._periodic_callback = None"),
+]
+
+# loop.py also needs nest_asyncio at the top to allow reentrant event loops
+# (msgpackrpc calls loop.start() inside callbacks, which is not allowed by asyncio)
+loop_path = sp / "loop.py"
+if loop_path.exists():
+    lt = loop_path.read_text()
+    if "nest_asyncio" not in lt:
+        lt = "import nest_asyncio\nnest_asyncio.apply()\n\n" + lt
+        loop_path.write_text(lt)
+        print("      Injected nest_asyncio into loop.py")
+
+# ── server.py ───────────────────────────────────────────────────────────
+patches["server.py"] = [
+    ("IOLoop.instance()", "IOLoop.current()"),
+]
+
+# ── transport/tcp.py ────────────────────────────────────────────────────
+# This file has the most breakage:
+#   1. IOStream() no longer accepts io_loop kwarg
+#   2. TCPServer.__init__() no longer accepts io_loop kwarg
+#   3. msgpack.Packer/Unpacker encoding param removed in msgpack 2.x
+patches["transport/tcp.py"] = [
+    ("from tornado.platform.auto import set_close_exec",
+     "def set_close_exec(fd): pass"),
+    ("IOLoop.instance()", "IOLoop.current()"),
+    # Client: IOStream(sock, io_loop=...) → IOStream(sock)
+    ("IOStream(self._address.socket(), io_loop=self._session._loop._ioloop)",
+     "IOStream(self._address.socket())"),
+    # Server: TCPServer.__init__(self, io_loop=io_loop) → TCPServer.__init__(self)
+    ("tcpserver.TCPServer.__init__(self, io_loop=io_loop)",
+     "tcpserver.TCPServer.__init__(self)"),
+    # Server constructor: remove io_loop parameter
+    ("def __init__(self, transport, io_loop=None, encodings=None):",
+     "def __init__(self, transport, encodings=None):"),
+    # Server instantiation: remove io_loop kwarg
+    ("MessagePackServer(self, io_loop=self._server._loop._ioloop, encodings=self._encodings)",
+     "MessagePackServer(self, encodings=self._encodings)"),
+]
+
+patched = 0
+for relpath, replacements in patches.items():
+    fpath = sp / relpath
+    if not fpath.exists():
+        continue
+    text = fpath.read_text()
+    changed = False
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new)
+            changed = True
+    if changed:
+        fpath.write_text(text)
+        patched += 1
+        print(f"      Patched {relpath}")
+
+# Handle msgpack 2.x encoding parameter removal (Packer/Unpacker)
+tcp_path = sp / "transport" / "tcp.py"
+if tcp_path.exists():
+    text = tcp_path.read_text()
+    if "encoding=encodings" in text:
+        # Replace Packer(encoding=...) and Unpacker(encoding=...) with
+        # version-compatible alternatives
+        text = text.replace(
+            "self._packer = msgpack.Packer(encoding=encodings[0], default=lambda x: x.to_msgpack())",
+            "try:\n"
+            "            self._packer = msgpack.Packer(encoding=encodings[0], default=lambda x: x.to_msgpack())\n"
+            "        except TypeError:\n"
+            "            self._packer = msgpack.Packer(default=lambda x: x.to_msgpack())"
+        )
+        text = text.replace(
+            "self._unpacker = msgpack.Unpacker(encoding=encodings[1])",
+            "try:\n"
+            "            self._unpacker = msgpack.Unpacker(encoding=encodings[1])\n"
+            "        except TypeError:\n"
+            "            self._unpacker = msgpack.Unpacker(raw=False)"
+        )
+        tcp_path.write_text(text)
+        print("      Patched transport/tcp.py (msgpack compat)")
+
+print(f"      {patched} file(s) patched for tornado 6 compat")
+PATCH_SCRIPT
+
+# Verify airsim is importable
+python3 -c "import airsim; print(f'      airsim {airsim.__version__} OK')" 2>/dev/null \
+    || python3 -c "import airsim; print('      airsim OK')" \
+    || { echo "      ERROR: airsim installation failed!"; exit 1; }
 
 # Detect CUDA driver version to pick correct PyTorch wheel
 CUDA_DRIVER_VER=$(python3 -c "
@@ -125,35 +338,42 @@ except:
 " 2>/dev/null)
 echo "      CUDA driver version code: $CUDA_DRIVER_VER"
 
-if [[ "$CUDA_DRIVER_VER" -ge 12010 ]]; then
-    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-    TORCH_PKG="torch torchvision"
-    echo "      Installing PyTorch 2.x (CUDA 12.1 wheels)..."
+if [[ "$CUDA_DRIVER_VER" -ge 12040 ]]; then
+    TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
+    echo "      Installing PyTorch >=2.6 (CUDA 12.4 wheels)..."
+elif [[ "$CUDA_DRIVER_VER" -ge 12010 ]]; then
+    TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
+    echo "      Installing PyTorch >=2.6 (CUDA 12.4 wheels, driver compat)..."
 elif [[ "$CUDA_DRIVER_VER" -ge 11030 ]]; then
     # Driver 470+ (CUDA 11.3+) supports cu118 runtime via forward compat
     TORCH_INDEX="https://download.pytorch.org/whl/cu118"
-    TORCH_PKG="torch torchvision"
-    echo "      Installing PyTorch 2.x (CUDA 11.8 wheels — driver CUDA $((CUDA_DRIVER_VER/1000)).$((CUDA_DRIVER_VER%1000/10)))..."
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
+    echo "      Installing PyTorch >=2.6 (CUDA 11.8 wheels — driver CUDA $((CUDA_DRIVER_VER/1000)).$((CUDA_DRIVER_VER%1000/10)))..."
 else
     TORCH_INDEX="https://download.pytorch.org/whl/cpu"
-    TORCH_PKG="torch torchvision"
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
     echo "      WARNING: No compatible CUDA driver found (code=$CUDA_DRIVER_VER). Installing CPU-only PyTorch (inference will be SLOW)..."
 fi
 
-$PIP install --quiet --user \
+$PIP install --quiet --user --upgrade \
     $TORCH_PKG \
     --index-url "$TORCH_INDEX" \
     2>&1 | _pip_filter | tail -5
 
+_TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "MISSING")
+echo "      PyTorch version after install: $_TORCH_VER"
+
 # Transformers + VLM deps
 echo "      Installing transformers + VLM deps..."
 $PIP install --quiet --user --prefer-binary \
-    'transformers>=4.40.0' \
+    'transformers>=4.47.0,<5.0' \
     'tokenizers>=0.19.0' \
     'timm>=0.9.10,<1.0.0' \
     'Pillow>=10.0.0' \
     'accelerate>=0.25.0' \
-    'sentencepiece' \
+    'protobuf>=3.20.0' \
     'huggingface_hub>=0.20.0' \
     'einops' \
     2>&1 | _pip_filter | tail -5
@@ -171,6 +391,37 @@ else:
 
 python3 -c "import transformers; print(f'      Transformers {transformers.__version__}')" \
     || { echo "      ERROR: transformers installation failed!"; exit 1; }
+
+# LLaMA-UAV specific dependencies
+if [[ "$CONTROLLER" == "llamauav" ]]; then
+    echo "      Installing LLaMA-UAV deps (peft, llava, llamavid)..."
+    $PIP install --quiet --user --prefer-binary \
+        'peft>=0.4.0' \
+        'decord' \
+        'fairscale' \
+        2>&1 | _pip_filter | tail -3
+
+    # Install llava (LLaVA utilities needed by LLaMA-UAV)
+    LLAVA_DIR="$PROJ_DIR/third_party/LLaVA"
+    if [ -d "$LLAVA_DIR" ]; then
+        $PIP install --quiet --user --no-deps -e "$LLAVA_DIR" 2>&1 | tail -2
+        echo "      llava package installed from $LLAVA_DIR"
+    else
+        echo "      LLaVA repo not found — cloning..."
+        git clone --depth 1 https://github.com/haotian-liu/LLaVA.git "$LLAVA_DIR" 2>&1 | tail -2
+        $PIP install --quiet --user --no-deps -e "$LLAVA_DIR" 2>&1 | tail -2
+        echo "      llava package installed from $LLAVA_DIR"
+    fi
+
+    # Install llamavid package from TravelUAV
+    LLAMAVID_DIR="$PROJ_DIR/third_party/TravelUAV/Model/LLaMA-UAV"
+    if [ -d "$LLAMAVID_DIR" ]; then
+        $PIP install --quiet --user --no-deps -e "$LLAMAVID_DIR" 2>&1 | tail -2
+        echo "      llamavid package installed from $LLAMAVID_DIR"
+    else
+        echo "      WARNING: TravelUAV not found at $LLAMAVID_DIR — clone it first"
+    fi
+fi
 echo "      Dependencies installed."
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -181,28 +432,49 @@ export PYTHONPATH="${PROJ_DIR}:${PYTHONPATH:-}"
 echo ""
 echo "[2/6] Checking model weights..."
 if [[ "$CONTROLLER" == "vlm" ]]; then
-    # VLM models are downloaded by HuggingFace's cache on first load.
-    # Pre-download here to avoid timeout during benchmark.
     echo "      VLM model: $VLM_MODEL"
-    python3 -c "
+    # Check if model is already cached; if so, skip download entirely
+    _VLM_CACHED=$(python3 -c "
+import pathlib
+cache_dir = pathlib.Path.home() / '.cache/huggingface/hub'
+model_slug = '$VLM_MODEL'.replace('/', '--')
+model_dir = cache_dir / f'models--{model_slug}'
+snapshots = list(model_dir.glob('snapshots/*/config.json')) if model_dir.exists() else []
+if snapshots:
+    print(snapshots[0].parent)
+else:
+    print('')
+" 2>/dev/null)
+
+    if [[ -n "$_VLM_CACHED" ]]; then
+        echo "      Model already cached at: $_VLM_CACHED"
+    else
+        echo "      Model not cached — downloading..."
+        python3 -c "
 from huggingface_hub import snapshot_download
-import os
-path = snapshot_download('$VLM_MODEL', resume_download=True)
+path = snapshot_download('$VLM_MODEL')
 print(f'      Model cached at: {path}')
 " || {
-        echo "      WARNING: VLM model pre-download failed — will retry at inference time"
-    }
-elif [[ -d "$MODEL_PATH" ]] && [[ -f "$MODEL_PATH/config.json" ]]; then
-    echo "      VLA model found at $MODEL_PATH"
-else
-    echo "      VLA model not found at $MODEL_PATH — downloading..."
-    python3 -m airsim_benchmark.scripts.download_model \
-        --model-id openvla/openvla-7b \
-        --output "$MODEL_PATH"
-    if [[ $? -ne 0 ]]; then
-        echo "      ERROR: Model download failed."
-        exit 1
+            echo "      WARNING: VLM model pre-download failed — will retry at inference time"
+        }
     fi
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    LLAMAUAV_DIR="${LLAMAUAV_MODEL:-$HOME/models/llama-uav}"
+    echo "      LLaMA-UAV weights dir: $LLAMAUAV_DIR"
+    _MISSING=""
+    [[ ! -d "$LLAMAUAV_DIR/vicuna-7b-v1.5" ]] && _MISSING="$_MISSING vicuna-7b-v1.5"
+    [[ ! -f "$LLAMAUAV_DIR/eva_vit_g.pth" ]] && _MISSING="$_MISSING eva_vit_g.pth"
+    [[ ! -d "$LLAMAUAV_DIR/llama-uav-7b" ]] && _MISSING="$_MISSING llama-uav-7b"
+    if [[ -n "$_MISSING" ]]; then
+        echo "      WARNING: Missing weights:$_MISSING"
+        echo "      Run: bash scripts/download_llamauav_weights.sh"
+    else
+        echo "      All LLaMA-UAV weights found"
+    fi
+elif [[ -d "$MODEL_PATH" ]] && [[ -f "$MODEL_PATH/config.json" ]]; then
+    echo "      Model found at $MODEL_PATH"
+else
+    echo "      Model: $MODEL_PATH (will download from HuggingFace on first load)"
 fi
 
 # ── Step 3: Deploy AirSim settings.json ──────────────────────────────────────
@@ -269,16 +541,42 @@ if [[ "$RECORD_FRAMES" == "1" ]]; then
 fi
 
 CONTROLLER_ARGS="--controller $CONTROLLER"
-if [[ "$CONTROLLER" == "vlm" ]]; then
+if [[ "$CONTROLLER" == "openfly" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path ${MODEL_PATH:-}"
+    if [[ -n "$LORA_PATH" ]]; then
+        CONTROLLER_ARGS="$CONTROLLER_ARGS --lora-path $LORA_PATH"
+    fi
+    if [[ -n "$REGRESSION_HEAD_PATH" ]]; then
+        CONTROLLER_ARGS="$CONTROLLER_ARGS --regression-head-path $REGRESSION_HEAD_PATH"
+    fi
+elif [[ "$CONTROLLER" == "vlm" || "$CONTROLLER" == "twostage" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --vlm-model $VLM_MODEL"
+elif [[ "$CONTROLLER" == "detection" || "$CONTROLLER" == "augmented" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --detection-model $DETECTION_MODEL"
+elif [[ "$CONTROLLER" == "hybrid" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --detection-model $DETECTION_MODEL --model-path ${MODEL_PATH:-IPEC-COMMUNITY/openfly-agent-7b}"
 elif [[ "$CONTROLLER" == "vla" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path $MODEL_PATH --waypoint-scale $WAYPOINT_SCALE"
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path ${LLAMAUAV_MODEL:-$HOME/models/llama-uav/llama-uav-7b}"
+fi
+
+# Add goal_bias if specified
+if [[ -n "$GOAL_BIAS" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --goal-bias $GOAL_BIAS"
+fi
+
+# Add mission mode args
+MODE_ARGS="--mode $RUN_MODE"
+if [[ "$RUN_MODE" == "mission" ]] && [[ -n "$MISSION_IDS" ]]; then
+    MODE_ARGS="$MODE_ARGS --missions $MISSION_IDS"
 fi
 
 python3 -m airsim_benchmark.scripts.run_benchmark \
     --config "$CONFIG" \
     --output "$OUTPUT_DIR" \
     $CONTROLLER_ARGS \
+    $MODE_ARGS \
     $TASK_ARGS \
     $RECORD_ARGS \
     --verbose
@@ -315,6 +613,8 @@ echo " BENCHMARK COMPLETE"
 echo " Controller: $CONTROLLER"
 if [[ "$CONTROLLER" == "vlm" ]]; then
     echo " VLM:        $VLM_MODEL"
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    echo " Model:      LLaMA-UAV (${LLAMAUAV_MODEL:-$HOME/models/llama-uav})"
 else
     echo " Model:      $MODEL_PATH"
 fi
