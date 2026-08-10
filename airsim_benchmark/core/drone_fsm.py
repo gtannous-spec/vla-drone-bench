@@ -80,7 +80,9 @@ class DroneFSM:
 
         try:
             self._phase_idle()
+            logger.info("Starting telemetry thread...")
             self._telemetry.start()
+            logger.info("Telemetry thread started (connecting in background)")
             self._phase_takeoff()
             self._phase_navigate()
             self._phase_land()

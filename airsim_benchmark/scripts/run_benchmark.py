@@ -14,6 +14,12 @@ Prerequisites:
     - settings.json from airsim_benchmark/config/ placed in ~/Documents/AirSim/
 """
 
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+
 import argparse
 import logging
 import os

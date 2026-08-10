@@ -143,7 +143,7 @@ class VLMInference:
 
     def _load_internvl(self, model_path: str, device: str) -> None:
         self._tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
+            model_path, trust_remote_code=True, use_fast=False
         )
         self._model = AutoModel.from_pretrained(
             model_path,

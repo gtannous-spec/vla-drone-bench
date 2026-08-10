@@ -9,7 +9,16 @@ import logging
 import time
 from typing import Optional, Tuple
 
-import airsim
+# On Python 3.10+, msgpackrpc's tornado-based RPC deadlocks because Tornado 6
+# wraps asyncio and run_forever() is not reentrant. Bypass it entirely by
+# replacing msgpackrpc.Client/Address with our synchronous socket-based client
+# BEFORE airsim imports msgpackrpc.
+from airsim_benchmark.core.sync_rpc import SyncClient, SyncAddress
+import msgpackrpc                       # noqa: E402 — must import before airsim
+msgpackrpc.Client = SyncClient          # monkey-patch
+msgpackrpc.Address = SyncAddress        # monkey-patch
+
+import airsim                           # noqa: E402 — now uses SyncClient
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -35,8 +44,11 @@ class AirSimClient:
 
     def connect(self) -> None:
         """Establish connection to the AirSim simulator."""
+        logger.info("Creating MultirotorClient...")
         self._client = airsim.MultirotorClient()
+        logger.info("Calling confirmConnection() (timeout=%ss)...", self._timeout_sec)
         self._client.confirmConnection()
+        logger.info("confirmConnection() returned — enabling API control...")
         self._client.enableApiControl(True, vehicle_name=self._vehicle_name)
         self._client.armDisarm(True, vehicle_name=self._vehicle_name)
         logger.info("Connected to AirSim — API control enabled, vehicle armed.")

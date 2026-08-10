@@ -76,7 +76,9 @@ class BenchmarkRunner:
             Dictionary with 'aggregate' and 'tasks' keys (same as metrics.json).
         """
         client = AirSimClient()
+        logger.info("Connecting main AirSim client...")
         client.connect()
+        logger.info("Main AirSim client connected successfully")
 
         try:
             for task_cfg in self._tasks:
@@ -134,8 +136,11 @@ class BenchmarkRunner:
 
         # Start recorder just before execution
         if recorder:
+            logger.info(f"  Starting FrameRecorder (task {task_id})...")
             recorder.start()
+            logger.info(f"  FrameRecorder started (task {task_id})")
 
+        logger.info(f"  Starting FSM execution (task {task_id})...")
         t_start = time.time()
         success = fsm.execute()
         t_elapsed = time.time() - t_start
