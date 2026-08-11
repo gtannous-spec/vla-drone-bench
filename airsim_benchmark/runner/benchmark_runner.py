@@ -168,7 +168,7 @@ class BenchmarkRunner:
         )
         result["csv_path"] = str(csv_path)
 
-        status = "PASS" if success else "FAIL"
+        status = "PASS" if result["success"] else "FAIL"
         logger.info(f"  Result: {status} — distance={result['final_distance_to_goal']:.2f}m, "
                     f"path={result['path_length']:.1f}m, time={t_elapsed:.1f}s, "
                     f"collisions={result['collision_count']}")
@@ -227,6 +227,15 @@ class BenchmarkRunner:
             }
 
         # Final distance: minimum distance to goal during NAVIGATE phase
+        # Final distance: use the drone's ACTUAL last position, not min-along-path
+        last = trajectory[-1]
+        final_dist = math.sqrt(
+            (last.x - goal[0]) ** 2
+            + (last.y - goal[1]) ** 2
+            + (last.z - goal[2]) ** 2
+        )
+
+        # Also track closest approach for reference
         min_dist = float("inf")
         for rec in trajectory:
             if rec.phase == "NAVIGATE":
@@ -237,12 +246,7 @@ class BenchmarkRunner:
                 )
                 min_dist = min(min_dist, d)
         if min_dist == float("inf"):
-            last = trajectory[-1]
-            min_dist = math.sqrt(
-                (last.x - goal[0]) ** 2
-                + (last.y - goal[1]) ** 2
-                + (last.z - goal[2]) ** 2
-            )
+            min_dist = final_dist
 
         # Path length (TAKEOFF + NAVIGATE phases)
         path_length = 0.0
@@ -280,12 +284,32 @@ class BenchmarkRunner:
                 if horiz > geofence_r:
                     violations += 1
 
+        # Success requires: FSM said goal reached AND final position is
+        # actually close AND collision count is reasonable.
+        max_collisions_for_pass = 50
+        success_dist_threshold = self._arrival_tolerance * 2.0
+        actual_success = (
+            success
+            and final_dist < success_dist_threshold
+            and len(collisions) <= max_collisions_for_pass
+        )
+
+        if success and not actual_success:
+            reasons = []
+            if final_dist >= success_dist_threshold:
+                reasons.append(f"final_dist={final_dist:.1f}m >= {success_dist_threshold:.1f}m")
+            if len(collisions) > max_collisions_for_pass:
+                reasons.append(f"collisions={len(collisions)} > {max_collisions_for_pass}")
+            logger.info(f"  Task {task_cfg['id']}: FSM reported success but "
+                        f"overridden to FAIL ({', '.join(reasons)})")
+
         return {
             "task_id": task_cfg["id"],
             "instruction": task_cfg["instruction"],
             "goal": goal,
-            "success": success,
-            "final_distance_to_goal": round(min_dist, 4),
+            "success": actual_success,
+            "final_distance_to_goal": round(final_dist, 4),
+            "closest_approach": round(min_dist, 4),
             "path_length": round(path_length, 4),
             "straight_line_distance": round(straight_line, 4),
             "normalized_path_length": round(npl, 4),

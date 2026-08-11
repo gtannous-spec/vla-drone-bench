@@ -18,7 +18,7 @@ vla_waypoint_scale: 15.0        # VLA delta → waypoint distance multiplier
 vla_convergence_threshold: 0.005 # action norm below which VLA declares "arrived"
 vla_max_hops: 50                # max VLA navigation iterations per task
 vla_min_hops_before_convergence: 8  # ignore convergence signals before this many hops
-vla_goal_bias: 0.3              # blend 30% goal direction into VLA output
+vla_goal_bias: 0.6              # blend 60% goal direction into VLA output
 vla_fallback_to_coords: true    # use coordinate proximity as fallback goal check
 
 # ── VLM controller settings ──────────────────────────────────────────────────
