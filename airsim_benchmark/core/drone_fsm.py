@@ -186,6 +186,20 @@ class DroneFSM:
                 logger.info("Goal reached — transitioning to LAND")
                 break
 
+    def _run_navigate_phase(self) -> bool:
+        """Public entry for running just the navigate phase (for multi-leg missions).
+
+        Resets the timer and runs navigation until the controller says goal reached
+        or the timeout expires. Does NOT takeoff or land.
+        """
+        self._start_time = time.time()
+        self._success = False
+        try:
+            self._phase_navigate()
+        except Exception as e:
+            logger.error(f"Navigate phase error: {e}")
+        return self._success
+
     def _phase_land(self) -> None:
         """LAND: Descend and disarm."""
         self._check_timeout()

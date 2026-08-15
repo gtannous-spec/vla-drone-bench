@@ -61,10 +61,13 @@ class BenchmarkRunner:
         else:
             self._tasks = all_tasks
 
+        self._missions = self._config.get("missions", [])
+
         self._arrival_tolerance = self._config.get("arrival_tolerance", 1.5)
         self._takeoff_altitude = self._config.get("takeoff_altitude", -5.0)
         self._nav_speed = self._config.get("nav_speed", 5.0)
         self._mission_timeout = self._config.get("mission_timeout", 90.0)
+        self._mission_timeout_long = self._config.get("mission_timeout_long", 600.0)
         self._telemetry_rate = self._config.get("telemetry_rate_hz", 10.0)
 
         self._results: List[dict] = []
@@ -91,6 +94,254 @@ class BenchmarkRunner:
         self._write_metrics(metrics)
         self._print_summary(metrics)
         return metrics
+
+    def run_missions(self, mission_ids: Optional[List[int]] = None) -> dict:
+        """Execute multi-leg GPS-free missions.
+
+        Each mission has multiple legs with per-leg instructions. The drone
+        navigates using only camera images and language prompts (no GPS coords).
+        """
+        client = AirSimClient()
+        logger.info("Connecting main AirSim client...")
+        client.connect()
+        logger.info("Main AirSim client connected successfully")
+
+        missions = self._missions
+        if mission_ids:
+            missions = [m for m in missions if m["id"] in mission_ids]
+
+        try:
+            for mission_cfg in missions:
+                result = self._run_mission(client, mission_cfg)
+                self._results.append(result)
+        finally:
+            client.disconnect()
+
+        metrics = self._compute_mission_metrics()
+        self._write_metrics(metrics)
+        self._print_mission_summary(metrics)
+        return metrics
+
+    def _run_mission(self, client: AirSimClient, mission_cfg: dict) -> dict:
+        """Run a multi-leg GPS-free mission."""
+        mission_id = mission_cfg["id"]
+        legs = mission_cfg.get("legs", [])
+        timeout = mission_cfg.get("timeout", self._mission_timeout_long)
+        constraints = mission_cfg.get("constraints", {})
+
+        logger.info(f"\n{'='*60}")
+        logger.info(f"  Mission {mission_id}: \"{mission_cfg['name']}\"")
+        logger.info(f"  Description: {mission_cfg['description']}")
+        logger.info(f"  Legs: {len(legs)}, timeout: {timeout}s")
+        logger.info(f"{'='*60}")
+
+        sx, sy, sz = mission_cfg["start"]
+        client.teleport_to(sx, sy, sz)
+
+        telemetry = TelemetryThread(
+            vehicle_name=client.vehicle_name, rate_hz=self._telemetry_rate
+        )
+
+        recorder = None
+        if self._record_frames:
+            frames_dir = self._output_dir / "frames" / f"mission_{mission_id}"
+            recorder = FrameRecorder(
+                output_dir=str(frames_dir),
+                vehicle_name=client.vehicle_name,
+                fps=self._record_fps,
+            )
+
+        needs_images = (
+            hasattr(self._controller, '_vla')
+            or hasattr(self._controller, '_vlm')
+            or hasattr(self._controller, '_model')
+        )
+
+        leg_results = []
+        mission_start = time.time()
+        all_actions = []
+
+        # Execute legs sequentially, reusing FSM for each leg
+        for leg_idx, leg in enumerate(legs):
+            elapsed_so_far = time.time() - mission_start
+            remaining_time = timeout - elapsed_so_far
+            if remaining_time <= 5:
+                logger.warning(f"  Mission timeout — skipping remaining legs")
+                break
+
+            leg_instruction = leg["instruction"]
+            leg_max_hops = leg.get("max_hops", self._config.get("mission_default_hops_per_leg", 25))
+
+            logger.info(f"\n  --- Leg {leg_idx + 1}/{len(legs)}: \"{leg_instruction}\" "
+                        f"(max {leg_max_hops} hops, {remaining_time:.0f}s left) ---")
+
+            leg_config = {
+                "id": mission_id,
+                "instruction": leg_instruction,
+                "constraints": constraints,
+                "max_hops": leg_max_hops,
+            }
+            self._controller.reset(leg_config)
+
+            leg_timeout = min(remaining_time, leg_max_hops * 10)
+
+            if leg_idx == 0:
+                fsm = DroneFSM(
+                    client=client,
+                    controller=self._controller,
+                    telemetry=telemetry,
+                    takeoff_altitude=self._takeoff_altitude,
+                    mission_timeout=leg_timeout,
+                    nav_speed=self._nav_speed,
+                    capture_images=needs_images,
+                )
+                if recorder:
+                    logger.info(f"  Starting FrameRecorder (mission {mission_id})...")
+                    recorder.start()
+                leg_start = time.time()
+                success = fsm.execute()
+                leg_elapsed = time.time() - leg_start
+            else:
+                fsm._controller = self._controller
+                fsm._mission_timeout = leg_timeout
+                fsm._phase = FlightPhase.NAVIGATE
+                leg_start = time.time()
+                success = fsm._run_navigate_phase()
+                leg_elapsed = time.time() - leg_start
+
+            leg_traj = telemetry.get_trajectory()
+            leg_results.append({
+                "leg": leg_idx + 1,
+                "instruction": leg_instruction,
+                "hops": self._controller._hop_count if hasattr(self._controller, '_hop_count') else 0,
+                "model_guided": self._controller._model_guided_hops if hasattr(self._controller, '_model_guided_hops') else 0,
+                "time_s": round(leg_elapsed, 1),
+                "success": success,
+            })
+
+        total_elapsed = time.time() - mission_start
+
+        telemetry.stop()
+        if recorder:
+            recorder.stop()
+            video_path = recorder.make_video(cleanup_frames=False)
+            if video_path:
+                logger.info(f"  Mission video: {video_path}")
+
+        trajectory = telemetry.get_trajectory()
+        collisions = telemetry.get_collisions()
+
+        csv_path = self._write_trajectory_csv(mission_id, trajectory)
+
+        path_length = self._compute_path_length(trajectory)
+        heading_changes = self._compute_heading_changes(trajectory)
+
+        result = {
+            "mission_id": mission_id,
+            "name": mission_cfg["name"],
+            "description": mission_cfg["description"],
+            "num_legs": len(legs),
+            "legs_completed": len(leg_results),
+            "leg_results": leg_results,
+            "total_time_s": round(total_elapsed, 1),
+            "path_length": round(path_length, 1),
+            "collision_count": len(collisions),
+            "trajectory_points": len(trajectory),
+            "heading_smoothness": round(float(np.std(heading_changes)), 4) if heading_changes else 0.0,
+            "mean_heading_change": round(float(np.mean(np.abs(heading_changes))), 4) if heading_changes else 0.0,
+            "csv_path": str(csv_path),
+        }
+
+        total_hops = sum(lr["hops"] for lr in leg_results)
+        total_guided = sum(lr["model_guided"] for lr in leg_results)
+        logger.info(f"  Mission {mission_id} complete: {len(leg_results)}/{len(legs)} legs, "
+                    f"path={path_length:.1f}m, time={total_elapsed:.1f}s, "
+                    f"hops={total_guided}/{total_hops} model-guided, "
+                    f"collisions={len(collisions)}")
+
+        return result
+
+    def _compute_path_length(self, trajectory: list) -> float:
+        path_length = 0.0
+        prev = None
+        for rec in trajectory:
+            if rec.phase in {"TAKEOFF", "NAVIGATE"}:
+                if prev is not None and prev.phase in {"TAKEOFF", "NAVIGATE"}:
+                    dx = rec.x - prev.x
+                    dy = rec.y - prev.y
+                    dz = rec.z - prev.z
+                    path_length += math.sqrt(dx * dx + dy * dy + dz * dz)
+            prev = rec
+        return path_length
+
+    def _compute_heading_changes(self, trajectory: list) -> list:
+        """Compute heading change (degrees) between consecutive NAVIGATE points."""
+        nav_points = [(rec.x, rec.y) for rec in trajectory if rec.phase == "NAVIGATE"]
+        if len(nav_points) < 3:
+            return []
+        changes = []
+        for i in range(1, len(nav_points) - 1):
+            dx1 = nav_points[i][0] - nav_points[i - 1][0]
+            dy1 = nav_points[i][1] - nav_points[i - 1][1]
+            dx2 = nav_points[i + 1][0] - nav_points[i][0]
+            dy2 = nav_points[i + 1][1] - nav_points[i][1]
+            h1 = math.atan2(dy1, dx1)
+            h2 = math.atan2(dy2, dx2)
+            delta = math.degrees(h2 - h1)
+            while delta > 180:
+                delta -= 360
+            while delta < -180:
+                delta += 360
+            changes.append(delta)
+        return changes
+
+    def _compute_mission_metrics(self) -> dict:
+        n = len(self._results)
+        if n == 0:
+            return {"aggregate": {}, "missions": []}
+
+        total_path = sum(r["path_length"] for r in self._results)
+        total_collisions = sum(r["collision_count"] for r in self._results)
+        total_legs = sum(r["num_legs"] for r in self._results)
+        completed_legs = sum(r["legs_completed"] for r in self._results)
+        smoothness_vals = [r["heading_smoothness"] for r in self._results if r["heading_smoothness"] > 0]
+
+        aggregate = {
+            "num_missions": n,
+            "total_legs": total_legs,
+            "completed_legs": completed_legs,
+            "total_path_length_m": round(total_path, 1),
+            "total_collisions": total_collisions,
+            "mean_heading_smoothness": round(float(np.mean(smoothness_vals)), 4) if smoothness_vals else 0.0,
+            "mean_path_per_mission": round(total_path / n, 1),
+        }
+        return {"aggregate": aggregate, "missions": self._results}
+
+    def _print_mission_summary(self, metrics: dict) -> None:
+        agg = metrics["aggregate"]
+        missions = metrics["missions"]
+
+        print(f"\n{'='*80}")
+        print(f"  GPS-FREE MISSION RESULTS — {agg['num_missions']} missions")
+        print(f"{'='*80}")
+        print(f"{'Mission':>8}  {'Name':<30}  {'Legs':>5}  {'Path(m)':>8}  "
+              f"{'Time(s)':>8}  {'Collisions':>10}  {'Smoothness':>10}")
+        print(f"{'-'*80}")
+
+        for m in missions:
+            print(f"{m['mission_id']:>8}  {m['name']:<30}  "
+                  f"{m['legs_completed']}/{m['num_legs']:>3}  "
+                  f"{m['path_length']:>8.1f}  "
+                  f"{m['total_time_s']:>8.1f}  "
+                  f"{m['collision_count']:>10}  "
+                  f"{m['heading_smoothness']:>10.4f}")
+
+        print(f"{'-'*80}")
+        print(f"  Total path: {agg['total_path_length_m']:.1f}m  "
+              f"Legs: {agg['completed_legs']}/{agg['total_legs']}  "
+              f"Collisions: {agg['total_collisions']}  "
+              f"Smoothness: {agg['mean_heading_smoothness']:.4f}")
+        print(f"{'='*80}\n")
 
     def _run_task(self, client: AirSimClient, task_cfg: dict) -> dict:
         """Run a single task through the FSM."""

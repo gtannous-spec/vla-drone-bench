@@ -26,7 +26,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=48G
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/users/ogal/gtannous/vla-proj/logs/vla_%j.out
 #SBATCH --error=/users/ogal/gtannous/vla-proj/logs/vla_%j.out
 
@@ -41,13 +41,22 @@ MODEL_PATH="${MODEL_PATH:-IPEC-COMMUNITY/openfly-agent-7b}"
 VLM_MODEL="${VLM_MODEL:-OpenGVLab/InternVL2-8B}"
 WAYPOINT_SCALE="${WAYPOINT_SCALE:-15.0}"
 SKIP_AIRSIM="${SKIP_AIRSIM:-1}"
+GOAL_BIAS="${GOAL_BIAS:-}"
+RUN_MODE="${RUN_MODE:-task}"
+MISSION_IDS="${MISSION_IDS:-}"
 RECORD_FRAMES="${RECORD_FRAMES:-1}"
 RECORD_FPS="${RECORD_FPS:-5}"
+LORA_PATH="${LORA_PATH:-}"
 AIRSIM_BINARY="${AIRSIM_BINARY:-$HOME/AirSim/AirSimNH/AirSimNH/LinuxNoEditor/AirSimNH.sh}"
 AIRSIM_SETTINGS_SRC="$PROJ_DIR/airsim_benchmark/config/settings.json"
 AIRSIM_SETTINGS_DST="$HOME/Documents/AirSim/settings.json"
 
-OUTPUT_DIR="$PROJ_DIR/logs/airsim_output/$CONTROLLER"
+# Include goal_bias in output dir name to allow parallel runs
+if [[ -n "$GOAL_BIAS" ]]; then
+    OUTPUT_DIR="$PROJ_DIR/logs/airsim_output/${CONTROLLER}_bias${GOAL_BIAS}"
+else
+    OUTPUT_DIR="$PROJ_DIR/logs/airsim_output/$CONTROLLER"
+fi
 TRAJ_DIR="$OUTPUT_DIR/trajectories"
 PLOT_DIR="$OUTPUT_DIR/plots"
 CONFIG="$PROJ_DIR/airsim_benchmark/config/benchmark_config.yaml"
@@ -63,10 +72,15 @@ echo " GPU:        $(nvidia-smi --query-gpu=name,memory.total --format=csv,nohea
 echo " Controller: $CONTROLLER"
 if [[ "$CONTROLLER" == "vlm" ]]; then
     echo " VLM:        $VLM_MODEL"
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    echo " Model:      LLaMA-UAV (${LLAMAUAV_MODEL:-$HOME/models/llama-uav})"
 else
     echo " Model:      $MODEL_PATH"
 fi
 echo " Scale:      $WAYPOINT_SCALE"
+echo " Goal Bias:  ${GOAL_BIAS:-default}"
+echo " LoRA:       ${LORA_PATH:-none}"
+echo " Mode:       $RUN_MODE"
 echo " Tasks:      $TASKS"
 echo " Output:     $OUTPUT_DIR"
 echo " Start:      $(date)"
@@ -315,25 +329,32 @@ except:
 " 2>/dev/null)
 echo "      CUDA driver version code: $CUDA_DRIVER_VER"
 
-if [[ "$CUDA_DRIVER_VER" -ge 12010 ]]; then
-    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-    TORCH_PKG="torch torchvision"
-    echo "      Installing PyTorch 2.x (CUDA 12.1 wheels)..."
+if [[ "$CUDA_DRIVER_VER" -ge 12040 ]]; then
+    TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
+    echo "      Installing PyTorch >=2.6 (CUDA 12.4 wheels)..."
+elif [[ "$CUDA_DRIVER_VER" -ge 12010 ]]; then
+    TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
+    echo "      Installing PyTorch >=2.6 (CUDA 12.4 wheels, driver compat)..."
 elif [[ "$CUDA_DRIVER_VER" -ge 11030 ]]; then
     # Driver 470+ (CUDA 11.3+) supports cu118 runtime via forward compat
     TORCH_INDEX="https://download.pytorch.org/whl/cu118"
-    TORCH_PKG="torch torchvision"
-    echo "      Installing PyTorch 2.x (CUDA 11.8 wheels — driver CUDA $((CUDA_DRIVER_VER/1000)).$((CUDA_DRIVER_VER%1000/10)))..."
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
+    echo "      Installing PyTorch >=2.6 (CUDA 11.8 wheels — driver CUDA $((CUDA_DRIVER_VER/1000)).$((CUDA_DRIVER_VER%1000/10)))..."
 else
     TORCH_INDEX="https://download.pytorch.org/whl/cpu"
-    TORCH_PKG="torch torchvision"
+    TORCH_PKG="torch>=2.6 torchvision>=0.21"
     echo "      WARNING: No compatible CUDA driver found (code=$CUDA_DRIVER_VER). Installing CPU-only PyTorch (inference will be SLOW)..."
 fi
 
-$PIP install --quiet --user \
+$PIP install --quiet --user --upgrade \
     $TORCH_PKG \
     --index-url "$TORCH_INDEX" \
     2>&1 | _pip_filter | tail -5
+
+_TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "MISSING")
+echo "      PyTorch version after install: $_TORCH_VER"
 
 # Transformers + VLM deps
 echo "      Installing transformers + VLM deps..."
@@ -361,6 +382,37 @@ else:
 
 python3 -c "import transformers; print(f'      Transformers {transformers.__version__}')" \
     || { echo "      ERROR: transformers installation failed!"; exit 1; }
+
+# LLaMA-UAV specific dependencies
+if [[ "$CONTROLLER" == "llamauav" ]]; then
+    echo "      Installing LLaMA-UAV deps (peft, llava, llamavid)..."
+    $PIP install --quiet --user --prefer-binary \
+        'peft>=0.4.0' \
+        'decord' \
+        'fairscale' \
+        2>&1 | _pip_filter | tail -3
+
+    # Install llava (LLaVA utilities needed by LLaMA-UAV)
+    LLAVA_DIR="$PROJ_DIR/third_party/LLaVA"
+    if [ -d "$LLAVA_DIR" ]; then
+        $PIP install --quiet --user --no-deps -e "$LLAVA_DIR" 2>&1 | tail -2
+        echo "      llava package installed from $LLAVA_DIR"
+    else
+        echo "      LLaVA repo not found — cloning..."
+        git clone --depth 1 https://github.com/haotian-liu/LLaVA.git "$LLAVA_DIR" 2>&1 | tail -2
+        $PIP install --quiet --user --no-deps -e "$LLAVA_DIR" 2>&1 | tail -2
+        echo "      llava package installed from $LLAVA_DIR"
+    fi
+
+    # Install llamavid package from TravelUAV
+    LLAMAVID_DIR="$PROJ_DIR/third_party/TravelUAV/Model/LLaMA-UAV"
+    if [ -d "$LLAMAVID_DIR" ]; then
+        $PIP install --quiet --user --no-deps -e "$LLAMAVID_DIR" 2>&1 | tail -2
+        echo "      llamavid package installed from $LLAMAVID_DIR"
+    else
+        echo "      WARNING: TravelUAV not found at $LLAMAVID_DIR — clone it first"
+    fi
+fi
 echo "      Dependencies installed."
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -396,6 +448,19 @@ print(f'      Model cached at: {path}')
 " || {
             echo "      WARNING: VLM model pre-download failed — will retry at inference time"
         }
+    fi
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    LLAMAUAV_DIR="${LLAMAUAV_MODEL:-$HOME/models/llama-uav}"
+    echo "      LLaMA-UAV weights dir: $LLAMAUAV_DIR"
+    _MISSING=""
+    [[ ! -d "$LLAMAUAV_DIR/vicuna-7b-v1.5" ]] && _MISSING="$_MISSING vicuna-7b-v1.5"
+    [[ ! -f "$LLAMAUAV_DIR/eva_vit_g.pth" ]] && _MISSING="$_MISSING eva_vit_g.pth"
+    [[ ! -d "$LLAMAUAV_DIR/llama-uav-7b" ]] && _MISSING="$_MISSING llama-uav-7b"
+    if [[ -n "$_MISSING" ]]; then
+        echo "      WARNING: Missing weights:$_MISSING"
+        echo "      Run: bash scripts/download_llamauav_weights.sh"
+    else
+        echo "      All LLaMA-UAV weights found"
     fi
 elif [[ -d "$MODEL_PATH" ]] && [[ -f "$MODEL_PATH/config.json" ]]; then
     echo "      Model found at $MODEL_PATH"
@@ -469,16 +534,33 @@ fi
 CONTROLLER_ARGS="--controller $CONTROLLER"
 if [[ "$CONTROLLER" == "openfly" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path ${MODEL_PATH:-}"
+    if [[ -n "$LORA_PATH" ]]; then
+        CONTROLLER_ARGS="$CONTROLLER_ARGS --lora-path $LORA_PATH"
+    fi
 elif [[ "$CONTROLLER" == "vlm" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --vlm-model $VLM_MODEL"
 elif [[ "$CONTROLLER" == "vla" ]]; then
     CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path $MODEL_PATH --waypoint-scale $WAYPOINT_SCALE"
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --model-path ${LLAMAUAV_MODEL:-$HOME/models/llama-uav/llama-uav-7b}"
+fi
+
+# Add goal_bias if specified
+if [[ -n "$GOAL_BIAS" ]]; then
+    CONTROLLER_ARGS="$CONTROLLER_ARGS --goal-bias $GOAL_BIAS"
+fi
+
+# Add mission mode args
+MODE_ARGS="--mode $RUN_MODE"
+if [[ "$RUN_MODE" == "mission" ]] && [[ -n "$MISSION_IDS" ]]; then
+    MODE_ARGS="$MODE_ARGS --missions $MISSION_IDS"
 fi
 
 python3 -m airsim_benchmark.scripts.run_benchmark \
     --config "$CONFIG" \
     --output "$OUTPUT_DIR" \
     $CONTROLLER_ARGS \
+    $MODE_ARGS \
     $TASK_ARGS \
     $RECORD_ARGS \
     --verbose
@@ -515,6 +597,8 @@ echo " BENCHMARK COMPLETE"
 echo " Controller: $CONTROLLER"
 if [[ "$CONTROLLER" == "vlm" ]]; then
     echo " VLM:        $VLM_MODEL"
+elif [[ "$CONTROLLER" == "llamauav" ]]; then
+    echo " Model:      LLaMA-UAV (${LLAMAUAV_MODEL:-$HOME/models/llama-uav})"
 else
     echo " Model:      $MODEL_PATH"
 fi

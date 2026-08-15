@@ -57,3 +57,5 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+.cursor/
+data/

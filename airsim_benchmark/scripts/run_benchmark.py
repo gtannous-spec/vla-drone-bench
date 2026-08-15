@@ -33,6 +33,7 @@ from airsim_benchmark.controllers.classical_controller import ClassicalWaypointC
 from airsim_benchmark.controllers.vla_controller import VLAHybridController
 from airsim_benchmark.controllers.vlm_controller import VLMController
 from airsim_benchmark.controllers.openfly_controller import OpenFlyController
+from airsim_benchmark.controllers.llamauav_controller import LLaMAUAVController
 from airsim_benchmark.controllers.drl_controller import DRLController
 from airsim_benchmark.runner.benchmark_runner import BenchmarkRunner
 
@@ -42,6 +43,7 @@ CONTROLLERS = {
     "vla": VLAHybridController,
     "vlm": VLMController,
     "openfly": OpenFlyController,
+    "llamauav": LLaMAUAVController,
     "drl": DRLController,
 }
 
@@ -123,10 +125,34 @@ def main():
         help="HuggingFace model ID or local path for VLM (default: from config)",
     )
     parser.add_argument(
+        "--lora-path",
+        default=None,
+        help="Path to LoRA adapter checkpoint for OpenFly controller",
+    )
+    parser.add_argument(
         "--waypoint-scale",
         type=float,
         default=None,
         help="VLA waypoint scale factor (default: from config or 15.0)",
+    )
+    parser.add_argument(
+        "--goal-bias",
+        type=float,
+        default=None,
+        help="Goal bias for VLA/VLN controllers (0.0=pure model, 1.0=pure goal)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["task", "mission"],
+        default="task",
+        help="Run mode: 'task' for single-goal tasks, 'mission' for multi-leg GPS-free missions",
+    )
+    parser.add_argument(
+        "--missions",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Mission IDs to run in mission mode (default: all)",
     )
     args = parser.parse_args()
 
@@ -146,6 +172,8 @@ def main():
     arrival_tol = args.arrival_tolerance or cfg.get("arrival_tolerance", 1.5)
     nav_speed = args.nav_speed or cfg.get("nav_speed", 5.0)
 
+    goal_bias = args.goal_bias if args.goal_bias is not None else cfg.get("vla_goal_bias", 0.6)
+
     if args.controller == "openfly":
         model_path = args.model_path or cfg.get(
             "openfly_model", "IPEC-COMMUNITY/openfly-agent-7b"
@@ -156,7 +184,8 @@ def main():
             nav_speed=nav_speed,
             waypoint_scale=args.waypoint_scale or cfg.get("vla_waypoint_scale", 15.0),
             max_hops=cfg.get("vla_max_hops", 50),
-            goal_bias=cfg.get("vla_goal_bias", 0.2),
+            goal_bias=goal_bias,
+            lora_path=args.lora_path or "",
         )
     elif args.controller == "vlm":
         vlm_model = args.vlm_model or cfg.get("vlm_model", "OpenGVLab/InternVL2-8B")
@@ -167,6 +196,20 @@ def main():
             waypoint_scale=cfg.get("vlm_waypoint_scale", 15.0),
             confidence_threshold=cfg.get("vlm_confidence_threshold", 0.3),
             max_hops=cfg.get("vlm_max_hops", 40),
+        )
+    elif args.controller == "llamauav":
+        llama_uav_dir = os.path.expanduser(
+            args.model_path or cfg.get("llamauav_model", "~/models/llama-uav/llama-uav-7b")
+        )
+        controller = LLaMAUAVController(
+            model_path=llama_uav_dir,
+            model_base=cfg.get("llamauav_base", "~/models/llama-uav/vicuna-7b-v1.5"),
+            vision_tower=cfg.get("llamauav_vision_tower", "~/models/llama-uav/eva_vit_g.pth"),
+            qformer_path=cfg.get("llamauav_qformer", "~/models/llama-uav/instruct_blip_vicuna7b_trimmed.pth"),
+            arrival_tolerance=arrival_tol,
+            nav_speed=nav_speed,
+            max_hops=cfg.get("vla_max_hops", 50),
+            goal_bias=goal_bias,
         )
     elif args.controller == "drl":
         policy_path = args.model_path or ""
@@ -190,7 +233,7 @@ def main():
             convergence_threshold=cfg.get("vla_convergence_threshold", 0.005),
             max_hops=cfg.get("vla_max_hops", 50),
             min_hops_before_convergence=cfg.get("vla_min_hops_before_convergence", 8),
-            goal_bias=cfg.get("vla_goal_bias", 0.3),
+            goal_bias=goal_bias,
             fallback_to_coords=cfg.get("vla_fallback_to_coords", True),
         )
     else:
@@ -203,11 +246,14 @@ def main():
     logger.info(f"Controller: {args.controller}")
     logger.info(f"Config: {config_path}")
     logger.info(f"Output: {args.output}")
-    logger.info(f"Tasks: {args.tasks or 'all'}")
+    logger.info(f"Mode: {args.mode}")
+    if args.mode == "task":
+        logger.info(f"Tasks: {args.tasks or 'all'}")
+    else:
+        logger.info(f"Missions: {args.missions or 'all'}")
     if args.record:
         logger.info(f"Recording: {args.record_fps} fps")
 
-    # Run benchmark
     runner = BenchmarkRunner(
         config_path=str(config_path),
         controller=controller,
@@ -217,11 +263,51 @@ def main():
         record_fps=args.record_fps,
     )
 
-    metrics = runner.run()
+    if args.mode == "mission":
+        metrics = runner.run_missions(mission_ids=args.missions)
+        run_type = "benchmark_mission"
+    else:
+        metrics = runner.run()
+        run_type = "benchmark_task"
 
-    # Return exit code based on success rate
-    sr = metrics.get("aggregate", {}).get("success_rate", 0.0)
-    sys.exit(0 if sr == 1.0 else 1)
+    # Auto-register experiment
+    try:
+        from airsim_benchmark.experiments import ExperimentRegistry
+        registry = ExperimentRegistry()
+        model_name = ""
+        if args.controller == "openfly":
+            model_name = args.model_path or "IPEC-COMMUNITY/openfly-agent-7b"
+        elif args.controller == "llamauav":
+            model_name = args.model_path or "TravelUAV/LLaMA-UAV"
+        elif args.controller == "vlm":
+            model_name = args.vlm_model or "OpenGVLab/InternVL2-8B"
+        elif args.controller == "vla":
+            model_name = args.model_path or "openvla/openvla-7b"
+        elif args.controller == "classical":
+            model_name = "classical-waypoint"
+
+        exp_id = registry.register_benchmark(
+            run_type=run_type,
+            controller=args.controller,
+            model=model_name,
+            metrics=metrics,
+            output_dir=args.output,
+            goal_bias=args.goal_bias,
+            waypoint_scale=args.waypoint_scale,
+            lora_path=args.lora_path,
+            slurm_job_id=os.environ.get("SLURM_JOB_ID"),
+            gpu=os.environ.get("SLURM_GPUS", os.environ.get("CUDA_VISIBLE_DEVICES")),
+            node=os.environ.get("SLURM_NODELIST", os.environ.get("HOSTNAME")),
+        )
+        logger.info(f"Experiment registered: {exp_id}")
+    except Exception as e:
+        logger.warning(f"Could not register experiment: {e}")
+
+    if run_type == "benchmark_task":
+        sr = metrics.get("aggregate", {}).get("success_rate", 0.0)
+        sys.exit(0 if sr == 1.0 else 1)
+    else:
+        sys.exit(0)
 
 
 if __name__ == "__main__":
