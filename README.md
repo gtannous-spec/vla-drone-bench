@@ -1,134 +1,148 @@
-# VLA Urban Drone Navigation Benchmark
+# VLA Urban Drone Navigation
 
-A research benchmark for evaluating **Vision-Language-Action (VLA)** models on urban drone navigation tasks using natural language instructions.
+A system that navigates a drone using **natural language instructions** and **camera vision** — no GPS, no pre-programmed waypoints.
 
-The project compares three controller paradigms — classical waypoint, OpenVLA, and deep reinforcement learning — across identical language-instructed missions in simulated urban environments.
+Give it an instruction like *"Fly to the red car, then land on the rooftop"* and the drone carries it out by looking through its camera and finding the objects mentioned in the text.
 
-## Milestones
+## How It Works
 
-| # | Controller | Simulator | Status |
-|---|-----------|-----------|--------|
-| M1 | Classical Waypoint | AirSim (Neighborhood) | Complete |
-| M2 | OpenVLA (7B) | ROS 2 Humble + Gazebo Harmonic + PX4 SITL | In Progress |
-| M3 | DRL Policy | TBD | Planned |
+```
+                        "Fly to the red car, then land on the rooftop"
+                                          │
+                          ┌───────────────┴───────────────┐
+                          │     INSTRUCTION PARSER         │
+                          │  Breaks text into steps:       │
+                          │   1. navigate(red car)         │
+                          │   2. land(rooftop, near=car)   │
+                          └───────────────┬───────────────┘
+                                          │
+                    ┌─────────────────────┴─────────────────────┐
+                    │            FOR EACH HOP (~2 seconds)       │
+                    │                                            │
+                    │   ┌──────────────┐   ┌──────────────┐     │
+                    │   │ GroundingDINO│   │  OpenFly-7B  │     │
+                    │   │  (234M)      │   │  (7.6B)      │     │
+                    │   │              │   │              │     │
+                    │   │ "WHERE is    │   │ "HOW to fly  │     │
+                    │   │  the target?"│   │  smoothly?"  │     │
+                    │   └──────┬───────┘   └──────┬───────┘     │
+                    │          │                   │             │
+                    │          └─────────┬─────────┘             │
+                    │                    │                       │
+                    │              BLEND: direction              │
+                    │              from DINO + flight            │
+                    │              dynamics from OpenFly         │
+                    │                    │                       │
+                    │                    ▼                       │
+                    │          Move drone 5m toward target       │
+                    │          Take new camera frame             │
+                    │          Repeat                            │
+                    └───────────────────────────────────────────┘
+```
+
+### The Two AI Models
+
+| Model | Role | What it does |
+|-------|------|-------------|
+| **GroundingDINO** (234M params) | The Eyes | Finds objects in camera images from text descriptions |
+| **OpenFly-Agent-7B** (7.6B params) | The Pilot | Trained on 100K drone flights, provides flight dynamics |
+
+GroundingDINO tells the drone **where** to go. OpenFly tells it **how** to fly there.
+
+### Navigation Modes
+
+| Mode | When | Behavior |
+|------|------|----------|
+| **TRACK** | Target visible in camera | Fly toward it |
+| **COAST** | Target lost briefly (1-3 hops) | Continue on last known heading |
+| **SEARCH** | Target not found | Rotate 360° to scan the area |
+
+### Landing Approach
+
+```
+Drone ----→ ----→ ----↘ ----↘ ----↓ LAND
+ cruise altitude     descending    vertical
+ (10m above)         gradually     drop onto
+                     as target     the target
+                     gets closer
+```
+
+## Mission Results
+
+| Mission | Instruction | Legs | Path | Time | Collisions |
+|---------|------------|------|------|------|------------|
+| 16 | Fly to red car → Land on rooftop | 2/2 | 166.9m | 83.4s | 0 |
+| 17 | Land on rooftop near red car | 1/1 | 102.3m | 63.5s | 0 |
+| 19 | Fly to car → Circle → Return | 3/3 | 123.6m | 67.6s | 0 |
+
+All missions GPS-free. The drone navigates using only camera + text instruction.
 
 ## Project Structure
 
 ```
 vla-proj/
-├── airsim_benchmark/           # M1: AirSim benchmark framework
-│   ├── config/                 # Task definitions (YAML) + AirSim settings
-│   ├── controllers/            # Controller implementations
-│   │   ├── base_controller.py  # Abstract controller interface
-│   │   ├── classical_controller.py
-│   │   ├── vla_controller.py   # OpenVLA stub
-│   │   └── drl_controller.py   # DRL stub
-│   ├── core/                   # AirSim client, FSM, telemetry, frame recorder
-│   ├── runner/                 # BenchmarkRunner orchestration
-│   ├── scripts/                # Entry points (run_benchmark.py, plot_flights.py)
-│   └── requirements.txt
-├── src/vla_navigation/         # M2: ROS 2 package
-│   ├── vla_navigation/         # ROS 2 nodes (classical_planner, vla_planner)
-│   ├── launch/                 # Launch files
-│   ├── worlds/                 # Gazebo SDF worlds
-│   └── config/                 # Benchmark config for ROS 2 track
-├── scripts/                    # Slurm jobs, container build, evaluation
-├── Dockerfile                  # M2 container (ROS 2 + Gazebo + PX4 + PyTorch)
-└── logs/                       # Generated output (gitignored)
+├── airsim_benchmark/
+│   ├── controllers/
+│   │   ├── hybrid_controller.py       # Main pipeline: DINO + OpenFly
+│   │   ├── augmented_controller.py    # Detection-only (no OpenFly)
+│   │   ├── detection_controller.py    # Single-object TRACK/COAST/SEARCH
+│   │   └── openfly_controller.py      # OpenFly-only (no detection)
+│   ├── core/
+│   │   ├── detection_inference.py     # GroundingDINO wrapper
+│   │   ├── instruction_parser.py      # Text → subtasks
+│   │   ├── subtask_fsm.py            # Step sequencing
+│   │   ├── target_phrase.py           # Aerial-friendly query alternatives
+│   │   ├── drone_fsm.py              # Flight state machine
+│   │   └── airsim_client.py          # Simulator connection
+│   ├── config/
+│   │   └── benchmark_config.yaml      # Mission definitions
+│   └── scripts/
+│       ├── run_benchmark.py           # CLI entry point
+│       └── audit_detection.py         # Detection rate testing
+├── scripts/
+│   ├── run_airsim_vla.slurm          # Run missions on cluster
+│   └── run_aerial_audit.sh           # Test detection alternatives
+├── docs/
+│   ├── PIPELINE_HANDBOOK_2026-08-24.md  # Detailed pipeline explanation
+│   └── GROUNDING_DINO_HANDBOOK_2026-08-23.md  # Detection model details
+└── logs/airsim_output/                # Flight videos and metrics
 ```
 
-## Benchmark Tasks
+## Quick Start
 
-Five language-instructed navigation tasks in the AirSim Neighborhood environment:
-
-| ID | Instruction | Distance |
-|----|-------------|----------|
-| 1 | Fly to the red car parked near the cul-de-sac | 54.4 m |
-| 2 | Navigate to the rooftop of the two-story house on the left | 86.0 m |
-| 3 | Go around the block and land in the backyard behind the white house | 73.3 m |
-| 4 | Fly low over the main road heading north toward the intersection | 120.1 m |
-| 5 | Inspect the mailbox at the end of the driveway on the right | 58.9 m |
-
-## Evaluation Metrics
-
-- **SR** — Success Rate (fraction of tasks where final distance < 1.5 m)
-- **FDG** — Final Distance to Goal (metres)
-- **NPL** — Normalized Path Length (actual / straight-line, 1.0 = optimal)
-- **Collisions** — Number of collision events
-- **Constraint Violations** — Altitude/geofence breaches
-
-## Getting Started
-
-### M1 — AirSim Benchmark
-
-**Prerequisites:**
-- AirSim v1.8.1 Linux binary ([AirSimNH](https://github.com/microsoft/AirSim/releases) environment)
-- Python 3.8+
-- GPU node with Xvfb for headless rendering
-
-**Install dependencies:**
+**Prerequisites:** AirSim Neighborhood binary, Python 3.10+, NVIDIA GPU (A100 recommended)
 
 ```bash
-cd airsim_benchmark
-pip install numpy msgpack-rpc-python
-pip install -r requirements.txt
+# Run the main mission (red car + rooftop landing)
+sbatch --export=ALL,CONTROLLER=hybrid,RUN_MODE=mission,MISSION_IDS=16,\
+GOAL_BIAS=0.0,SKIP_AIRSIM=0,RECORD_FRAMES=1 scripts/run_airsim_vla.slurm
 ```
 
-**Run the benchmark:**
+Flight videos saved to `logs/airsim_output/hybrid_bias0.0/frames/mission_16/flight.mp4`
 
-```bash
-python -m airsim_benchmark.scripts.run_benchmark --controller classical
-```
+## Aerial Detection — Solving the Domain Gap
 
-**On a Slurm cluster:**
+GroundingDINO was trained on ground-level internet photos. From a drone at 10-20m altitude, objects look completely different. We solved this with **aerial-friendly alternative queries**:
 
-```bash
-sbatch scripts/run_airsim_benchmark.slurm
-```
+| Object | Original query (0% detection) | Aerial alternative | Detection rate |
+|--------|------------------------------|-------------------|---------------|
+| Rooftop | "rooftop" | "house top view" | **97.5%** |
+| Tree | "tree" | "tree canopy" | **90.0%** |
+| Garage | "garage" | "car shelter" | **92.5%** |
+| Intersection | "intersection" | "road crossing" | **60.0%** |
+| Mailbox | "mailbox" | "post box" | **72.5%** |
 
-### M2 — ROS 2 / Gazebo / PX4 / OpenVLA
+Zero training required — just smarter prompts. The system automatically tries all alternatives in a single detection pass.
 
-**Build the container:**
+## Hardware
 
-```bash
-docker build -t vla-sim:m2 .
-```
-
-**Run with OpenVLA weights mounted:**
-
-```bash
-docker run --gpus all \
-  -v $HOME/models/openvla-7b:/models/openvla-7b \
-  vla-sim:m2
-```
-
-On a Slurm cluster with Pyxis, see `scripts/run_poc.slurm`.
-
-## Architecture
-
-All controllers implement a common interface (`BaseController`) with:
-- `reset()` — initialize for a new task
-- `get_action()` — compute next action from state/observation
-- `is_goal_reached()` — check task completion
-
-The drone operates through a 5-state FSM: **IDLE -> TAKEOFF -> NAVIGATE -> LAND -> DONE**.
-
-## Hardware (Tested On)
-
-- NVIDIA DGX cluster (A100-SXM4-40GB GPUs)
-- 8 CPU cores, 32 GB RAM per job
-- Shared NFS storage
-
-## Baseline Results (M1 Classical Controller)
-
-| Metric | Value |
-|--------|-------|
-| Success Rate | 100% (5/5) |
-| Mean Final Distance | 0.466 m |
-| Mean Normalized Path Length | 1.177 |
-| Mean Time to Goal | 28.45 s |
-
-Full results: [`logs/airsim_output/classical/BASELINE_REPORT.md`](logs/airsim_output/classical/BASELINE_REPORT.md)
+| Component | Specification |
+|-----------|--------------|
+| GPU | NVIDIA A100-SXM4-40GB |
+| CPU | 8 cores per job |
+| RAM | 48 GB |
+| Simulator | AirSim (Unreal Engine) |
+| Cluster | Slurm-managed DGX nodes |
 
 ## License
 
